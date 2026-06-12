@@ -149,6 +149,10 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
 
   final List<String> _logs = [];
 
+  void _addLog(String logMsg) {
+    globalLogger.log(logMsg);
+  }
+
   void _setPromptState(PromptState newState, String message) {
     if (_promptState != newState || _promptStateMessage != message) {
       if (_promptState != newState) {
@@ -207,7 +211,7 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
 
     if (idleMs >= totalTimeoutMs + 3000 + (_promptRepeatCount * _promptRepeatInterval * 1000)) {
       if (_promptRepeatCount >= _promptMaxRepeats) {
-         _setPromptState(PromptState.WAITING_FOR_RECITATION, 'Waiting for recitation (Max repeats reached)');
+         _setPromptState(PromptState.PROMPT_EXPIRED, 'Waiting for recitation (Max repeats reached)');
       } else if (_promptRepeatCount == 0 && _promptState != PromptState.PLAYING_AUDIO) {
          _addLog('[PROMPT] triggered');
          _setPromptState(PromptState.PLAYING_AUDIO, 'PLAYING AUDIO');
@@ -479,7 +483,6 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
               onPressed: () {
                 _lastSurah = surah;
                 _lastAyah = ayah;
-                widget.engine.sendTaraweehConfig(surah, ayah);
                 Navigator.pop(context, true);
               },
               child: const Text('Start'),
@@ -913,7 +916,7 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
                            textDirection: TextDirection.rtl,
                            style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, fontFamily: 'Amiri'),
                          )
-                      ] else if (_promptState == 'LEVEL 2' || _promptState.startsWith('COUNTDOWN')) ...[
+                      ] else if (_promptState == PromptState.PAUSE_TIMER_RUNNING) ...[
                          Text(
                            _nextAyahText.isNotEmpty ? _nextAyahText : _currentAyahText,
                            textAlign: TextAlign.center,
