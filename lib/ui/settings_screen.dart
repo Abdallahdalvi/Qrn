@@ -161,10 +161,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Text(
-                  'Voice Activity Detection (VAD)',
-                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                const Expanded(
+                  child: Text(
+                    'Voice Activity Detection (VAD)',
+                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                  ),
                 ),
+                const SizedBox(width: 8),
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                   decoration: BoxDecoration(

@@ -858,7 +858,7 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
                       Text('Search Window: $_searchWindow', style: const TextStyle(fontSize: 12, color: Colors.blueGrey)),
                       Text('Fallback Count: $_fallbackCount', style: const TextStyle(fontSize: 12, color: Colors.blueGrey)),
                       if (_promptModeEnabled)
-                         Text('Prompt State: $_promptState', style: const TextStyle(fontSize: 12, color: Colors.deepPurple, fontWeight: FontWeight.bold)),
+                         Text('Prompt State: ${_promptState.name}', style: const TextStyle(fontSize: 12, color: Colors.deepPurple, fontWeight: FontWeight.bold)),
                       if (_assistedAyah > 0)
                          Text('Prompted Ayah: $_assistedAyah', style: const TextStyle(fontSize: 12, color: Colors.orange, fontWeight: FontWeight.bold)),
                       if (_promptRepeatCount > 0)
@@ -895,7 +895,7 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
                   ),
                 ),
               ),
-            if (_promptModeEnabled && _promptState != 'PROMPT DISABLED' && _promptState != 'WAITING FOR LOCK' && _promptState != 'PROMPT READY')
+            if (_promptModeEnabled && _promptState != PromptState.DISABLED && _promptState != PromptState.WAITING_FOR_LOCK && _promptState != PromptState.PROMPT_READY && _promptState != PromptState.IDLE)
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16.0),
                 child: Container(
@@ -909,11 +909,11 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
                   child: Column(
                     children: [
                       Text(
-                        _promptState == 'LEVEL 1' ? 'Need Help? Next Word:' : 'Need Help?',
+                        _promptState == PromptState.PROMPT_DISPLAYED ? 'Need Help? Next Word:' : 'Need Help?',
                         style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.orange, fontSize: 16),
                       ),
                       const SizedBox(height: 10),
-                      if (_promptState == 'LEVEL 1') ...[
+                      if (_promptState == PromptState.PROMPT_DISPLAYED) ...[
                          Text(
                            _getNextWordHint(),
                            textAlign: TextAlign.center,
@@ -922,12 +922,11 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
                          )
                       ] else if (_promptState == PromptState.PAUSE_TIMER_RUNNING) ...[
                          Text(
-                           _nextAyahText.isNotEmpty ? _nextAyahText : _currentAyahText,
+                           _promptStateMessage,
                            textAlign: TextAlign.center,
-                           textDirection: TextDirection.rtl,
-                           style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, fontFamily: 'Amiri'),
+                           style: const TextStyle(fontSize: 18, color: Colors.black54),
                          )
-                      ] else if (_promptState == 'PLAYING AUDIO') ...[
+                      ] else if (_promptState == PromptState.PLAYING_AUDIO || _promptState == PromptState.PROMPT_REPEAT) ...[
                          const Icon(Icons.volume_up, color: Colors.orange, size: 48),
                          const SizedBox(height: 8),
                          Text(
