@@ -223,34 +223,46 @@ class TarteelSocketClient {
   }
 
   void startTaraweeh(int surah, int ayah) {
-    _isTaraweehActive = true;
-    _taraweehSurah = surah;
-    _taraweehAyah = ayah;
-    if (_socket != null && _isReady && _socket!.readyState == WebSocket.open) {
-      _socket!.add(jsonEncode({
-        "type": "start_taraweeh",
-        "surah": surah,
-        "ayah": ayah
-      }));
+    try {
+      _isTaraweehActive = true;
+      _taraweehSurah = surah;
+      _taraweehAyah = ayah;
+      if (_socket != null && _isReady && _socket!.readyState == WebSocket.open) {
+        _socket!.add(jsonEncode({
+          "type": "start_taraweeh",
+          "surah": surah,
+          "ayah": ayah
+        }));
+      }
+    } catch (e, stack) {
+      globalLogger.logError('Exception in startTaraweeh: $e', stack);
     }
   }
 
   void sendAssistedPrompt(int ayah) {
-    if (_socket != null && _isReady && _socket!.readyState == WebSocket.open) {
-      _socket!.add(jsonEncode({
-        "type": "assisted_prompt",
-        "ayah": ayah
-      }));
+    try {
+      if (_socket != null && _isReady && _socket!.readyState == WebSocket.open) {
+        _socket!.add(jsonEncode({
+          "type": "assisted_prompt",
+          "ayah": ayah
+        }));
+      }
+    } catch (e, stack) {
+      globalLogger.logError('Exception in sendAssistedPrompt: $e', stack);
     }
   }
 
   void requestPrompt(int surah, int ayah) {
-    if (_socket != null && _isReady && _socket!.readyState == WebSocket.open) {
-      _socket!.add(jsonEncode({
-        "type": "request_prompt",
-        "surah": surah,
-        "ayah": ayah
-      }));
+    try {
+      if (_socket != null && _isReady && _socket!.readyState == WebSocket.open) {
+        _socket!.add(jsonEncode({
+          "type": "prompt_request",
+          "surah": surah,
+          "ayah": ayah
+        }));
+      }
+    } catch (e, stack) {
+      globalLogger.logError('Exception in requestPrompt: $e', stack);
     }
   }
 

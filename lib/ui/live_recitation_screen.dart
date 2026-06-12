@@ -49,6 +49,11 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
   String _promptText = '';
   String _surahNameEn = '';
   String _surahNameAr = '';
+  Object? _lastCrashError;
+  StackTrace? _lastCrashStackTrace;
+
+  // Settings
+  bool _debugModeEnabled = false;
   num _confidence = 0.0;
   int _wordPosition = 0;
   int _totalWords = 0;
@@ -58,7 +63,6 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
   String _searchWindow = '';
   int _fallbackCount = 0;
   bool _taraweehModeEnabled = false;
-  bool _debugModeEnabled = false;
   bool _showDebugScreen = false;
   
   bool _promptModeEnabled = false;
@@ -249,26 +253,33 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
   }
 
   void _cancelPrompt() {
-     _audioPlayer.stop();
-     _audioPlayedForCurrentPause = false;
-     _promptRepeatCount = 0;
-     if (_assistedAyah > 0) {
-        _assistedAyah = 0;
-        widget.engine.clearAssistedPrompt();
+     try {
+       _audioPlayer.stop();
+       _audioPlayedForCurrentPause = false;
+       _promptRepeatCount = 0;
+       if (_assistedAyah > 0) {
+          _assistedAyah = 0;
+          widget.engine.clearAssistedPrompt();
+       }
+     } catch (e, stack) {
+       globalLogger.logError('Exception in _cancelPrompt: [${e.runtimeType}] $e', stack);
      }
   }
   
   void _playPromptAudio(String audioUrl, {bool forceRepeat = false}) {
       if (_audioPlayedForCurrentPause && !forceRepeat) return;
-      _audioPlayedForCurrentPause = true;
-      _addLog('[PROMPT] Audio Download Started: $audioUrl');
-      _audioPlayer.setUrl(audioUrl).then((_) {
-         _addLog('[PROMPT] Audio Playback Start');
-         _audioPlayer.play();
-      }).catchError((e) {
-         debugPrint("Audio play error: $e");
-         _addLog('[PROMPT] Audio Playback Error: $e');
-      });
+      try {
+        _audioPlayedForCurrentPause = true;
+        _addLog('[PROMPT] Audio Download Started: $audioUrl');
+        _audioPlayer.setUrl(audioUrl).then((_) {
+           _addLog('[PROMPT] Audio Playback Start');
+           _audioPlayer.play();
+        }).catchError((e, stack) {
+           globalLogger.logError('Exception in _playPromptAudio async: [${e.runtimeType}] $e', stack);
+        });
+      } catch (e, stack) {
+        globalLogger.logError('Exception in _playPromptAudio sync: [${e.runtimeType}] $e', stack);
+      }
   }
 
   void _handleEvent(Map<String, dynamic> event) {
@@ -461,10 +472,14 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
       }
     } catch (e, stack) {
       globalLogger.logError('Exception in _toggleListening: [${e.runtimeType}] $e', stack);
-      setState(() {
-        _recognitionStatus = 'Hardware/System Error';
-        _isListening = false;
-      });
+      if (mounted) {
+        setState(() {
+          _lastCrashError = e;
+          _lastCrashStackTrace = stack;
+          _showDebugScreen = true;
+          _recognitionStatus = 'ERROR: $e';
+        });
+      }
     }
   }
 
@@ -576,6 +591,13 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
             Text('Anchor Ayah: $_expectedAyah', style: const TextStyle(color: Colors.white, fontSize: 16)),
             Text('Repeat Count: $_promptRepeatCount / $_promptMaxRepeats', style: const TextStyle(color: Colors.white, fontSize: 16)),
             const SizedBox(height: 24),
+            if (_lastCrashError != null) ...[
+              const Text('--- LAST FATAL ERROR ---', style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold, fontSize: 18)),
+              const SizedBox(height: 8),
+              Text('ERROR: $_lastCrashError', style: const TextStyle(color: Colors.red, fontWeight: FontWeight.bold, fontSize: 16)),
+              Text('STACK TRACE:\n$_lastCrashStackTrace', style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
+              const SizedBox(height: 24),
+            ],
             const Text('--- DEVELOPER CONTROLS ---', style: TextStyle(color: Colors.yellow, fontWeight: FontWeight.bold, fontSize: 18)),
             const SizedBox(height: 8),
             ElevatedButton(
