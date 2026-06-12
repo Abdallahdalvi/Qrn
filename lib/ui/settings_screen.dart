@@ -1,14 +1,19 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../engine/socket_client.dart';
+import '../audio/audio_capture.dart';
+import 'package:record/record.dart';
+import 'dart:async';
 
 class SettingsScreen extends StatefulWidget {
   final TarteelSocketClient engine;
+  final AudioCaptureService audioService;
   final VoidCallback onSaved;
 
   const SettingsScreen({
     Key? key,
     required this.engine,
+    required this.audioService,
     required this.onSaved,
   }) : super(key: key);
 
@@ -21,6 +26,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late TextEditingController _portController;
   String _testStatus = '';
   bool _isTesting = false;
+  StreamSubscription<Amplitude>? _ampSub;
+  double _currentRMS = -100.0;
 
   @override
   void initState() {
@@ -28,6 +35,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _ipController = TextEditingController(text: widget.engine.serverIp);
     _portController = TextEditingController(text: widget.engine.serverPort);
     _loadExtraSettings();
+    
+    _ampSub = widget.audioService.onAmplitude.listen((amp) {
+      if (mounted) {
+        setState(() => _currentRMS = amp.current);
+      }
+    });
   }
 
   int _promptTimeout = 15;
@@ -35,6 +48,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   int _promptRepeatInterval = 10;
   int _promptMaxRepeats = 3;
   bool _debugModeEnabled = false;
+  double _vadThreshold = -20.0;
 
   Future<void> _loadExtraSettings() async {
     final prefs = await SharedPreferences.getInstance();
@@ -44,11 +58,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _promptRepeatInterval = prefs.getInt('prompt_repeat_interval') ?? 10;
       _promptMaxRepeats = prefs.getInt('prompt_max_repeats') ?? 3;
       _debugModeEnabled = prefs.getBool('debug_mode') ?? false;
+      _vadThreshold = prefs.getDouble('vad_threshold') ?? -20.0;
     });
   }
 
   @override
   void dispose() {
+    _ampSub?.cancel();
     _ipController.dispose();
     _portController.dispose();
     super.dispose();
@@ -90,6 +106,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await prefs.setInt('prompt_repeat_interval', _promptRepeatInterval);
     await prefs.setInt('prompt_max_repeats', _promptMaxRepeats);
     await prefs.setBool('debug_mode', _debugModeEnabled);
+    await prefs.setDouble('vad_threshold', _vadThreshold);
 
     await widget.engine.saveSettings(ip, port);
     widget.onSaved();
@@ -139,6 +156,54 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
               keyboardType: TextInputType.number,
               onChanged: (_) => setState(() {}),
+            ),
+            const SizedBox(height: 24),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  'Voice Activity Detection (VAD)',
+                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: _currentRMS > _vadThreshold ? Colors.green.withOpacity(0.2) : Colors.red.withOpacity(0.2),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: _currentRMS > _vadThreshold ? Colors.green : Colors.red),
+                  ),
+                  child: Text(
+                    'Live RMS: ${_currentRMS.toStringAsFixed(1)} dB',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: _currentRMS > _vadThreshold ? Colors.green : Colors.red,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Set the minimum volume threshold for speech detection. Make sure your "Live RMS" stays below this number when you are completely silent.',
+              style: TextStyle(color: Colors.grey),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Text('${_vadThreshold.toStringAsFixed(1)} dB', style: const TextStyle(fontWeight: FontWeight.bold)),
+                Expanded(
+                  child: Slider(
+                    value: _vadThreshold,
+                    min: -100.0,
+                    max: 0.0,
+                    divisions: 100,
+                    label: _vadThreshold.toStringAsFixed(1),
+                    onChanged: (val) {
+                      setState(() => _vadThreshold = val);
+                    },
+                  ),
+                ),
+              ],
             ),
             const SizedBox(height: 24),
             const Text(

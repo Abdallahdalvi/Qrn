@@ -61,6 +61,7 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
   bool _showDebugScreen = false;
   
   bool _promptModeEnabled = false;
+  double _vadThreshold = -20.0;
   
   String _currentAyahText = '';
   String _nextAyahText = '';
@@ -115,6 +116,7 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
       _promptMaxRepeats = prefs.getInt('prompt_max_repeats') ?? 3;
       _debugModeEnabled = prefs.getBool('debug_mode') ?? false;
       _promptModeEnabled = _promptAggressiveness != 'Off';
+      _vadThreshold = prefs.getDouble('vad_threshold') ?? -20.0;
     });
   }
 
@@ -418,7 +420,7 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
         
         _ampSub = widget.audioService.onAmplitude.listen((amp) {
            _currentRMS = amp.current;
-           if (amp.current > -20.0) { // Increased VAD Threshold
+           if (amp.current > _vadThreshold) { // Dynamic VAD Threshold
              if (!_isSpeaking) {
                _addLog('[SPEECH] detected');
                _lastLoggedPauseSecond = -1;
@@ -510,10 +512,12 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
       MaterialPageRoute(
         builder: (context) => SettingsScreen(
           engine: widget.engine,
+          audioService: widget.audioService,
           onSaved: () async {
             _addLog('Settings updated. Reconnecting...');
             await widget.engine.disconnect();
             await _initEngine();
+            await _loadSettings();
           },
         ),
       ),
@@ -541,7 +545,7 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
             const SizedBox(height: 8),
             Text('Recording: ${_isListening ? "YES" : "NO"}', style: const TextStyle(color: Colors.white, fontSize: 16)),
             Text('Speech Detected: ${_isSpeaking ? "TRUE" : "FALSE"}', style: const TextStyle(color: Colors.cyanAccent, fontSize: 16, fontWeight: FontWeight.bold)),
-            Text('Audio RMS: ${_currentRMS.toStringAsFixed(2)} dB (Threshold: -20.0)', style: const TextStyle(color: Colors.white, fontSize: 16)),
+            Text('Audio RMS: ${_currentRMS.toStringAsFixed(2)} dB (Threshold: ${_vadThreshold.toStringAsFixed(1)})', style: const TextStyle(color: Colors.white, fontSize: 16)),
             Text('Tracking State: $_trackingMode', style: const TextStyle(color: Colors.white, fontSize: 16)),
             Text('Tracking Locked: ${_trackingMode.contains("LOCKED") || _trackingMode == "NORMAL"}', style: const TextStyle(color: Colors.white, fontSize: 16)),
             Text('Confidence: ${(_confidence * 100).toStringAsFixed(0)}%', style: const TextStyle(color: Colors.white, fontSize: 16)),
