@@ -140,7 +140,7 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
     setState(() {
       _promptTimeout = prefs.getInt('prompt_timeout') ?? 15;
       _promptAggressiveness = prefs.getString('prompt_aggressiveness') ?? 'Normal';
-      _promptRepeatInterval = prefs.getString('prompt_repeat_interval') ?? 10;
+      _promptRepeatInterval = prefs.getInt('prompt_repeat_interval') ?? 10;
       _promptMaxRepeats = prefs.getInt('prompt_max_repeats') ?? 3;
       _debugModeEnabled = prefs.getBool('debug_mode') ?? false;
       _promptModeEnabled = _promptAggressiveness != 'Off';
@@ -500,8 +500,8 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
             TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
             ElevatedButton(
               onPressed: () {
-                _lastSurah = surah;
-                _lastAyah = ayah;
+                _expectedSurah = surah;
+                _expectedAyah = ayah;
                 Navigator.pop(context, true);
               },
               child: const Text('Start'),
@@ -577,8 +577,8 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
             Text('Prompt State: ${_promptState.name}', style: const TextStyle(color: Colors.orangeAccent, fontSize: 16, fontWeight: FontWeight.bold)),
             Text('Prompt Message: $_promptStateMessage', style: const TextStyle(color: Colors.white70, fontSize: 14)),
             Text('Pause Timer: ${(_isListening ? DateTime.now().difference(_lastSpeechTime).inMilliseconds / 1000 : 0.0).toStringAsFixed(1)} s', style: const TextStyle(color: Colors.white, fontSize: 16)),
-            Text('Anchor Surah: ${_currentSurah > 0 ? _currentSurah : _lastSurah}', style: const TextStyle(color: Colors.white, fontSize: 16)),
-            Text('Anchor Ayah: ${_currentAyah > 0 ? _currentAyah : _lastAyah}', style: const TextStyle(color: Colors.white, fontSize: 16)),
+            Text('Anchor Surah: $_expectedSurah', style: const TextStyle(color: Colors.white, fontSize: 16)),
+            Text('Anchor Ayah: $_expectedAyah', style: const TextStyle(color: Colors.white, fontSize: 16)),
             Text('Repeat Count: $_promptRepeatCount / $_promptMaxRepeats', style: const TextStyle(color: Colors.white, fontSize: 16)),
             const SizedBox(height: 24),
             const Text('--- DEVELOPER CONTROLS ---', style: TextStyle(color: Colors.yellow, fontWeight: FontWeight.bold, fontSize: 18)),
@@ -587,12 +587,8 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
               style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
               onPressed: () {
                 _setPromptState(PromptState.PROMPT_DISPLAYED, 'DEV FORCE TRIGGER');
-                int anchorSurah = _currentSurah > 0 ? _currentSurah : _lastSurah;
-                int anchorAyah = _currentAyah > 0 ? _currentAyah : _lastAyah;
-                if (anchorSurah > 0 && anchorAyah > 0) {
-                  setState(() => _assistedAyah = anchorAyah + 1);
-                  widget.engine.sendAssistedPrompt(_assistedAyah);
-                  _playPromptAudio(anchorSurah, anchorAyah + 1, forceRepeat: true);
+                if (_expectedSurah > 0 && _expectedAyah > 0) {
+                  widget.engine.requestPrompt(_expectedSurah, _expectedAyah);
                 }
               },
               child: const Text('Trigger Prompt Now', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
@@ -602,8 +598,8 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
               style: ElevatedButton.styleFrom(backgroundColor: Colors.blueAccent),
               onPressed: () {
                 setState(() {
-                  _lastSurah = _currentSurah > 0 ? _currentSurah : 1;
-                  _lastAyah = _currentAyah > 0 ? _currentAyah : 1;
+                  _expectedSurah = _currentSurah > 0 ? _currentSurah : 1;
+                  _expectedAyah = _currentAyah > 0 ? _currentAyah + 1 : 1;
                   _trackingMode = 'LOCKED (DEV)';
                   _confidence = 0.99;
                 });
@@ -615,8 +611,8 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
               style: ElevatedButton.styleFrom(backgroundColor: Colors.grey),
               onPressed: () {
                 setState(() {
-                  _lastSurah = 0;
-                  _lastAyah = 0;
+                  _expectedSurah = 0;
+                  _expectedAyah = 0;
                   _currentSurah = 0;
                   _currentAyah = 0;
                   _trackingMode = 'IDLE';
