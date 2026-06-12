@@ -24,6 +24,19 @@ class LiveRecitationScreen extends StatefulWidget {
   _LiveRecitationScreenState createState() => _LiveRecitationScreenState();
 }
 
+enum PromptState {
+  DISABLED,
+  IDLE,
+  WAITING_FOR_LOCK,
+  PROMPT_READY,
+  PAUSE_TIMER_RUNNING,
+  PROMPT_DISPLAYED,
+  PLAYING_AUDIO,
+  PROMPT_REPEAT,
+  PROMPT_EXPIRED,
+  RECOVERY_MODE
+}
+
 class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
   bool _isListening = false;
   StreamSubscription<Uint8List>? _audioSub;
@@ -31,6 +44,8 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
   String _recognitionStatus = 'Idle';
   int _currentSurah = 0;
   int _currentAyah = 0;
+  int _lastSurah = 0;
+  int _lastAyah = 0;
   String _surahNameEn = '';
   String _surahNameAr = '';
   num _confidence = 0.0;
@@ -43,6 +58,7 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
   int _fallbackCount = 0;
   bool _taraweehModeEnabled = false;
   bool _debugModeEnabled = false;
+  bool _showDebugScreen = false;
   
   bool _promptModeEnabled = false;
   
@@ -58,7 +74,8 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
   DateTime _lastSpeechTime = DateTime.now();
   DateTime _lastProgressionTime = DateTime.now();
   double _currentRMS = -100.0;
-  String _promptState = 'PROMPT DISABLED';
+  PromptState _promptState = PromptState.DISABLED;
+  String _promptStateMessage = 'PROMPT DISABLED';
   int _promptRepeatCount = 0;
   bool _isPromptConfirmed = false;
   int _assistedAyah = 0;
@@ -132,46 +149,44 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
 
   final List<String> _logs = [];
 
-  void _addLog(String logMsg) {
-    globalLogger.log(logMsg);
-  }
-
-  void _setPromptState(String newState) {
-    if (_promptState != newState) {
-      _addLog('[Prompt] Transition: $_promptState -> $newState');
-      setState(() => _promptState = newState);
+  void _setPromptState(PromptState newState, String message) {
+    if (_promptState != newState || _promptStateMessage != message) {
+      if (_promptState != newState) {
+        _addLog('[Prompt] Transition: ${_promptState.name} -> ${newState.name} ($message)');
+      }
+      setState(() {
+         _promptState = newState;
+         _promptStateMessage = message;
+      });
     }
   }
 
   void _evaluatePromptState() {
     if (!mounted || !_isListening || !_promptModeEnabled) {
-      _setPromptState('PROMPT DISABLED');
+      _setPromptState(PromptState.DISABLED, 'PROMPT DISABLED');
       _cancelPrompt();
       return;
     }
 
-    bool isLocked = _trackingMode == 'LOCKED' || _trackingMode == 'MUTASHABIHAT_LOCKED';
-    
-    double threshold = 0.80;
-    if (_promptAggressiveness == 'Conservative') threshold = 0.90;
-    else if (_promptAggressiveness == 'Aggressive') threshold = 0.60;
-    else if (_promptAggressiveness == 'Off') {
-       _setPromptState('PROMPT DISABLED');
+    if (_promptAggressiveness == 'Off') {
+       _setPromptState(PromptState.DISABLED, 'PROMPT DISABLED');
        _cancelPrompt();
        return;
     }
 
-    bool isConfident = _confidence >= threshold;
-    bool hasValidAyah = _currentSurah > 0 && _currentAyah > 0;
+    // Determine Anchor Position
+    int anchorSurah = _currentSurah > 0 ? _currentSurah : _lastSurah;
+    int anchorAyah = _currentAyah > 0 ? _currentAyah : _lastAyah;
+    bool hasValidAnchor = anchorSurah > 0 && anchorAyah > 0;
 
-    if (!isLocked || !isConfident || !hasValidAyah) {
-      _setPromptState('WAITING FOR LOCK');
+    if (!hasValidAnchor) {
+      _setPromptState(PromptState.WAITING_FOR_LOCK, 'WAITING FOR FIRST LOCK OR TARAWEEH CONFIG');
       _cancelPrompt();
       return;
     }
 
     if (_isSpeaking) {
-      _setPromptState('PROMPT READY (Speech Active)');
+      _setPromptState(PromptState.PROMPT_READY, 'PROMPT READY (Speech Active)');
       _cancelPrompt();
       return;
     }
@@ -189,42 +204,35 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
     }
     
     final totalTimeoutMs = _promptTimeout * 1000;
-    final level1Ms = (totalTimeoutMs / 3).round();
-    final level2Ms = (totalTimeoutMs * 2 / 3).round();
-    final level3Ms = totalTimeoutMs;
 
-    if (idleMs >= level3Ms + 3000 + (_promptRepeatCount * _promptRepeatInterval * 1000)) {
-      if (_promptRepeatCount > _promptMaxRepeats) {
-         _setPromptState('Waiting for recitation...');
-      } else if (_promptRepeatCount == 0 && _promptState != 'PLAYING AUDIO') {
+    if (idleMs >= totalTimeoutMs + 3000 + (_promptRepeatCount * _promptRepeatInterval * 1000)) {
+      if (_promptRepeatCount >= _promptMaxRepeats) {
+         _setPromptState(PromptState.WAITING_FOR_RECITATION, 'Waiting for recitation (Max repeats reached)');
+      } else if (_promptRepeatCount == 0 && _promptState != PromptState.PLAYING_AUDIO) {
          _addLog('[PROMPT] triggered');
-         _setPromptState('PLAYING AUDIO');
+         _setPromptState(PromptState.PLAYING_AUDIO, 'PLAYING AUDIO');
          setState(() {
-           _assistedAyah = _currentAyah + 1;
+           _assistedAyah = anchorAyah + 1;
          });
          widget.engine.sendAssistedPrompt(_assistedAyah);
-         _playPromptAudio();
-      } else if (_promptRepeatCount > 0 && _promptRepeatCount <= _promptMaxRepeats) {
-         if (_promptState != 'PLAYING AUDIO (Repeat $_promptRepeatCount)') {
+         _playPromptAudio(anchorSurah, anchorAyah + 1);
+      } else if (_promptRepeatCount > 0 && _promptRepeatCount < _promptMaxRepeats) {
+         if (_promptState != PromptState.PROMPT_REPEAT || _promptStateMessage != 'PLAYING AUDIO (Repeat $_promptRepeatCount)') {
             _addLog('[PROMPT] triggered (Repeat $_promptRepeatCount)');
-            _setPromptState('PLAYING AUDIO (Repeat $_promptRepeatCount)');
-            _playPromptAudio(forceRepeat: true);
+            _setPromptState(PromptState.PROMPT_REPEAT, 'PLAYING AUDIO (Repeat $_promptRepeatCount)');
+            _playPromptAudio(anchorSurah, anchorAyah + 1, forceRepeat: true);
          }
       }
       
-      if (_promptRepeatCount <= _promptMaxRepeats && idleMs >= level3Ms + 3000 + ((_promptRepeatCount + 1) * _promptRepeatInterval * 1000)) {
+      if (_promptRepeatCount < _promptMaxRepeats && idleMs >= totalTimeoutMs + 3000 + ((_promptRepeatCount + 1) * _promptRepeatInterval * 1000)) {
          _promptRepeatCount++;
       }
-    } else if (idleMs >= level3Ms) {
-      final countdown = 3 - ((idleMs - level3Ms) ~/ 1000);
+    } else if (idleMs >= totalTimeoutMs) {
+      final countdown = 3 - ((idleMs - totalTimeoutMs) ~/ 1000);
       final cdText = countdown > 0 ? 'COUNTDOWN: $countdown' : 'COUNTDOWN: 1';
-      _setPromptState(cdText);
-    } else if (idleMs >= level2Ms) {
-      _setPromptState('LEVEL 2 (Silence >= ${level2Ms/1000}s)');
-    } else if (idleMs >= level1Ms) {
-      _setPromptState('LEVEL 1 (Silence >= ${level1Ms/1000}s)');
+      _setPromptState(PromptState.PAUSE_TIMER_RUNNING, cdText);
     } else {
-      _setPromptState('PROMPT READY (Silence < ${level1Ms/1000}s)');
+      _setPromptState(PromptState.PAUSE_TIMER_RUNNING, 'Silence >= ${currentPauseSeconds}s (Timeout in ${(_promptTimeout - currentPauseSeconds)}s)');
     }
   }
 
@@ -238,16 +246,19 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
      }
   }
   
-  void _playPromptAudio({bool forceRepeat = false}) {
+  void _playPromptAudio(int surah, int ayah, {bool forceRepeat = false}) {
       if (_audioPlayedForCurrentPause && !forceRepeat) return;
       _audioPlayedForCurrentPause = true;
-      String s = _currentSurah.toString().padLeft(3, '0');
-      String a = (_currentAyah + 1).toString().padLeft(3, '0');
+      String s = surah.toString().padLeft(3, '0');
+      String a = ayah.toString().padLeft(3, '0');
       String audioUrl = "https://everyayah.com/data/Alafasy_128kbps/$s$a.mp3";
+      _addLog('[PROMPT] Audio Download Started: $audioUrl');
       _audioPlayer.setUrl(audioUrl).then((_) {
+         _addLog('[PROMPT] Audio Playback Start');
          _audioPlayer.play();
       }).catchError((e) {
          debugPrint("Audio play error: $e");
+         _addLog('[PROMPT] Audio Playback Error: $e');
       });
   }
 
@@ -292,6 +303,10 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
       }
       
       setState(() {
+         if (_currentSurah > 0 && _currentAyah > 0 && _confidence >= 0.8) {
+            _lastSurah = _currentSurah;
+            _lastAyah = _currentAyah;
+         }
          _currentSurah = newSurah;
          _currentAyah = newAyah;
          _confidence = event['confidence'] ?? 0.0;
@@ -460,9 +475,16 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
           ),
           actions: [
             TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-            ElevatedButton(onPressed: () => Navigator.pop(context, true), child: const Text('Start')),
-          ],
-        );
+            ElevatedButton(
+              onPressed: () {
+                _lastSurah = surah;
+                _lastAyah = ayah;
+                widget.engine.sendTaraweehConfig(surah, ayah);
+                Navigator.pop(context, true);
+              },
+              child: const Text('Start'),
+            ),
+          ],);
       }
     );
 
@@ -495,12 +517,124 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
     );
   }
 
+  Widget _buildDebugScreen() {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        title: const Text('Diagnostics & Debug', style: TextStyle(color: Colors.yellow)),
+        backgroundColor: Colors.black,
+        iconTheme: const IconThemeData(color: Colors.white),
+        leading: IconButton(
+          icon: const Icon(Icons.close),
+          onPressed: () => setState(() => _showDebugScreen = false),
+        ),
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text('--- STATE ---', style: TextStyle(color: Colors.yellow, fontWeight: FontWeight.bold, fontSize: 18)),
+            const SizedBox(height: 8),
+            Text('Recording: ${_isListening ? "YES" : "NO"}', style: const TextStyle(color: Colors.white, fontSize: 16)),
+            Text('Speech Detected: ${_isSpeaking ? "TRUE" : "FALSE"}', style: const TextStyle(color: Colors.cyanAccent, fontSize: 16, fontWeight: FontWeight.bold)),
+            Text('Audio RMS: ${_currentRMS.toStringAsFixed(2)} dB (Threshold: -20.0)', style: const TextStyle(color: Colors.white, fontSize: 16)),
+            Text('Tracking State: $_trackingMode', style: const TextStyle(color: Colors.white, fontSize: 16)),
+            Text('Tracking Locked: ${_trackingMode.contains("LOCKED") || _trackingMode == "NORMAL"}', style: const TextStyle(color: Colors.white, fontSize: 16)),
+            Text('Confidence: ${(_confidence * 100).toStringAsFixed(0)}%', style: const TextStyle(color: Colors.white, fontSize: 16)),
+            const SizedBox(height: 16),
+            const Text('--- PROMPT MACHINE ---', style: TextStyle(color: Colors.yellow, fontWeight: FontWeight.bold, fontSize: 18)),
+            const SizedBox(height: 8),
+            Text('Prompt State: ${_promptState.name}', style: const TextStyle(color: Colors.orangeAccent, fontSize: 16, fontWeight: FontWeight.bold)),
+            Text('Prompt Message: $_promptStateMessage', style: const TextStyle(color: Colors.white70, fontSize: 14)),
+            Text('Pause Timer: ${(_isListening ? DateTime.now().difference(_lastSpeechTime).inMilliseconds / 1000 : 0.0).toStringAsFixed(1)} s', style: const TextStyle(color: Colors.white, fontSize: 16)),
+            Text('Anchor Surah: ${_currentSurah > 0 ? _currentSurah : _lastSurah}', style: const TextStyle(color: Colors.white, fontSize: 16)),
+            Text('Anchor Ayah: ${_currentAyah > 0 ? _currentAyah : _lastAyah}', style: const TextStyle(color: Colors.white, fontSize: 16)),
+            Text('Repeat Count: $_promptRepeatCount / $_promptMaxRepeats', style: const TextStyle(color: Colors.white, fontSize: 16)),
+            const SizedBox(height: 24),
+            const Text('--- DEVELOPER CONTROLS ---', style: TextStyle(color: Colors.yellow, fontWeight: FontWeight.bold, fontSize: 18)),
+            const SizedBox(height: 8),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+              onPressed: () {
+                _setPromptState(PromptState.PROMPT_DISPLAYED, 'DEV FORCE TRIGGER');
+                int anchorSurah = _currentSurah > 0 ? _currentSurah : _lastSurah;
+                int anchorAyah = _currentAyah > 0 ? _currentAyah : _lastAyah;
+                if (anchorSurah > 0 && anchorAyah > 0) {
+                  setState(() => _assistedAyah = anchorAyah + 1);
+                  widget.engine.sendAssistedPrompt(_assistedAyah);
+                  _playPromptAudio(anchorSurah, anchorAyah + 1, forceRepeat: true);
+                }
+              },
+              child: const Text('Trigger Prompt Now', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+            ),
+            const SizedBox(height: 8),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.blueAccent),
+              onPressed: () {
+                setState(() {
+                  _lastSurah = _currentSurah > 0 ? _currentSurah : 1;
+                  _lastAyah = _currentAyah > 0 ? _currentAyah : 1;
+                  _trackingMode = 'LOCKED (DEV)';
+                  _confidence = 0.99;
+                });
+              },
+              child: const Text('Force Lock Current Position', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+            ),
+            const SizedBox(height: 8),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.grey),
+              onPressed: () {
+                setState(() {
+                  _lastSurah = 0;
+                  _lastAyah = 0;
+                  _currentSurah = 0;
+                  _currentAyah = 0;
+                  _trackingMode = 'IDLE';
+                  _confidence = 0.0;
+                });
+              },
+              child: const Text('Reset Tracking', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+            ),
+            const SizedBox(height: 24),
+            const Text('--- LOGS ---', style: TextStyle(color: Colors.yellow, fontWeight: FontWeight.bold, fontSize: 18)),
+            const SizedBox(height: 8),
+            Container(
+              height: 300,
+              color: Colors.grey[900],
+              child: ListView.builder(
+                padding: const EdgeInsets.all(8),
+                itemCount: _logs.length,
+                itemBuilder: (context, index) {
+                  return Text(
+                    _logs[_logs.length - 1 - index],
+                    style: const TextStyle(color: Colors.greenAccent, fontFamily: 'monospace', fontSize: 12),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    if (_showDebugScreen) {
+      return _buildDebugScreen();
+    }
+    
     return Scaffold(
       appBar: AppBar(
         title: Text(_debugModeEnabled ? 'Live Recitation (Debug)' : 'Live Recitation'),
         actions: [
+          if (_debugModeEnabled)
+            IconButton(
+              icon: const Icon(Icons.bug_report, color: Colors.orange),
+              onPressed: () => setState(() => _showDebugScreen = true),
+              tooltip: 'Open Debug Screen',
+            ),
           IconButton(
             icon: const Icon(Icons.settings),
             onPressed: _openSettings,
@@ -647,40 +781,6 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
                         ),
                         const SizedBox(height: 24),
                       ],
-                      if (_debugModeEnabled)
-                        Container(
-                          color: Colors.black.withOpacity(0.8),
-                          padding: const EdgeInsets.all(12),
-                          margin: const EdgeInsets.only(bottom: 16),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: [
-                              Text('--- DIAGNOSTICS ---', style: TextStyle(color: Colors.yellow, fontWeight: FontWeight.bold, fontSize: 16)),
-                              Text('Recording: ${_isListening ? "YES" : "NO"}', style: TextStyle(color: Colors.white, fontSize: 14)),
-                              Text('Speech Detected: ${_isSpeaking ? "TRUE" : "FALSE"}', style: TextStyle(color: Colors.cyanAccent, fontSize: 14, fontWeight: FontWeight.bold)),
-                              Text('Audio RMS: ${_currentRMS.toStringAsFixed(2)} dB (Threshold: -20.0)', style: TextStyle(color: Colors.white, fontSize: 14)),
-                              Text('Tracking State: $_trackingMode', style: TextStyle(color: Colors.white, fontSize: 14)),
-                              Text('Tracking Locked: ${_trackingMode.contains("LOCKED") || _trackingMode == "NORMAL"}', style: TextStyle(color: Colors.white, fontSize: 14)),
-                              Text('Confidence: ${(_confidence * 100).toStringAsFixed(0)}%', style: TextStyle(color: Colors.white, fontSize: 14)),
-                              SizedBox(height: 8),
-                              Text('Prompt State: $_promptState', style: TextStyle(color: Colors.orangeAccent, fontSize: 14, fontWeight: FontWeight.bold)),
-                              Text('Pause Timer: ${(_isListening ? DateTime.now().difference(_lastSpeechTime).inMilliseconds / 1000 : 0.0).toStringAsFixed(1)} s', style: TextStyle(color: Colors.white, fontSize: 14)),
-                              SizedBox(height: 8),
-                              ElevatedButton(
-                                style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
-                                onPressed: () {
-                                  _setPromptState('DEV FORCE TRIGGER');
-                                  setState(() {
-                                    _assistedAyah = _currentAyah + 1;
-                                  });
-                                  widget.engine.sendAssistedPrompt(_assistedAyah);
-                                  _playPromptAudio(forceRepeat: true);
-                                },
-                                child: Text('Trigger Prompt Now (DEV)', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                              ),
-                            ],
-                          ),
-                        ),
                       if (_currentSurah > 0) ...[
                         Text(
                           'Surah: $_surahNameEn',

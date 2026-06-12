@@ -444,6 +444,10 @@ def predict_audio(audio: np.ndarray, current_surah: int = 0, current_ayah: int =
                         is_jump = True
                 elif match["surah"] == current_surah + 1 and tracking_mode == "SURAH_TRANSITION":
                     is_jump = False
+                elif taraweeh_mode:
+                    # STRICT RULE: Never jump to a different Surah during Taraweeh mode unless transitioning
+                    is_jump = True
+                    match["score"] = 0.0 # Force reject
                 else:
                     is_jump = True
                     
