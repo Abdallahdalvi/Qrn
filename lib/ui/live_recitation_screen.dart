@@ -44,8 +44,9 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
   String _recognitionStatus = 'Idle';
   int _currentSurah = 0;
   int _currentAyah = 0;
-  int _lastSurah = 0;
-  int _lastAyah = 0;
+  int _expectedSurah = 0;
+  int _expectedAyah = 0;
+  String _promptText = '';
   String _surahNameEn = '';
   String _surahNameAr = '';
   num _confidence = 0.0;
@@ -101,9 +102,36 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
         if (_logs.length > 200) _logs.removeLast();
       });
     });
-    
-    _listenToEngine();
+
+    _audioPlayer.playerStateStream.listen((state) {
+      if (state.processingState == ProcessingState.completed) {
+         _addLog('[PROMPT] Audio Playback Completed');
+         if (mounted) {
+           setState(() {
+              _lastSpeechTime = DateTime.now();
+              _lastProgressionTime = DateTime.now();
+              _audioPlayedForCurrentPause = false;
+              if (_promptRepeatCount >= _promptMaxRepeats) {
+                 _promptState = PromptState.PROMPT_EXPIRED;
+                 _promptStateMessage = 'Waiting for recitation (Max repeats reached)';
+              } else {
+                 _promptState = PromptState.PAUSE_TIMER_RUNNING;
+                 _promptStateMessage = 'Timer restarted';
+              }
+           });
+         }
+      }
+    });
+
     _initEngine();
+    _loadSettings();
+    
+    // Auto-start listening on app launch
+    Future.microtask(() {
+      if (!_isListening) {
+        _toggleListening();
+      }
+    });
   }
 
   Future<void> _loadSettings() async {
@@ -112,7 +140,7 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
     setState(() {
       _promptTimeout = prefs.getInt('prompt_timeout') ?? 15;
       _promptAggressiveness = prefs.getString('prompt_aggressiveness') ?? 'Normal';
-      _promptRepeatInterval = prefs.getInt('prompt_repeat_interval') ?? 10;
+      _promptRepeatInterval = prefs.getString('prompt_repeat_interval') ?? 10;
       _promptMaxRepeats = prefs.getInt('prompt_max_repeats') ?? 3;
       _debugModeEnabled = prefs.getBool('debug_mode') ?? false;
       _promptModeEnabled = _promptAggressiveness != 'Off';
@@ -180,12 +208,7 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
        return;
     }
 
-    // Determine Anchor Position
-    int anchorSurah = _currentSurah > 0 ? _currentSurah : _lastSurah;
-    int anchorAyah = _currentAyah > 0 ? _currentAyah : _lastAyah;
-    bool hasValidAnchor = anchorSurah > 0 && anchorAyah > 0;
-
-    if (!hasValidAnchor) {
+    if (_expectedSurah <= 0 || _expectedAyah <= 0) {
       _setPromptState(PromptState.WAITING_FOR_LOCK, 'WAITING FOR FIRST LOCK OR TARAWEEH CONFIG');
       _cancelPrompt();
       return;
@@ -209,36 +232,24 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
         _addLog('[PAUSE] timer = $currentPauseSeconds');
     }
     
-    final totalTimeoutMs = _promptTimeout * 1000;
+    final targetTimeoutMs = _promptRepeatCount == 0 ? (_promptTimeout * 1000) : (_promptRepeatInterval * 1000);
 
-    if (idleMs >= totalTimeoutMs + 3000 + (_promptRepeatCount * _promptRepeatInterval * 1000)) {
+    if (idleMs >= targetTimeoutMs) {
       if (_promptRepeatCount >= _promptMaxRepeats) {
          _setPromptState(PromptState.PROMPT_EXPIRED, 'Waiting for recitation (Max repeats reached)');
-      } else if (_promptRepeatCount == 0 && _promptState != PromptState.PLAYING_AUDIO) {
-         _addLog('[PROMPT] triggered');
-         _setPromptState(PromptState.PLAYING_AUDIO, 'PLAYING AUDIO');
-         setState(() {
-           _assistedAyah = anchorAyah + 1;
-         });
-         widget.engine.sendAssistedPrompt(_assistedAyah);
-         _playPromptAudio(anchorSurah, anchorAyah + 1);
-      } else if (_promptRepeatCount > 0 && _promptRepeatCount < _promptMaxRepeats) {
-         if (_promptState != PromptState.PROMPT_REPEAT || _promptStateMessage != 'PLAYING AUDIO (Repeat $_promptRepeatCount)') {
-            _addLog('[PROMPT] triggered (Repeat $_promptRepeatCount)');
-            _setPromptState(PromptState.PROMPT_REPEAT, 'PLAYING AUDIO (Repeat $_promptRepeatCount)');
-            _playPromptAudio(anchorSurah, anchorAyah + 1, forceRepeat: true);
-         }
-      }
-      
-      if (_promptRepeatCount < _promptMaxRepeats && idleMs >= totalTimeoutMs + 3000 + ((_promptRepeatCount + 1) * _promptRepeatInterval * 1000)) {
+      } else if (_promptState != PromptState.PLAYING_AUDIO && _promptState != PromptState.PROMPT_REPEAT) {
+         _addLog('[PROMPT] triggered (Repeat $_promptRepeatCount)');
+         _setPromptState(_promptRepeatCount == 0 ? PromptState.PLAYING_AUDIO : PromptState.PROMPT_REPEAT, 'PLAYING AUDIO (Repeat $_promptRepeatCount)');
          _promptRepeatCount++;
+         widget.engine.requestPrompt(_expectedSurah, _expectedAyah);
       }
-    } else if (idleMs >= totalTimeoutMs) {
-      final countdown = 3 - ((idleMs - totalTimeoutMs) ~/ 1000);
-      final cdText = countdown > 0 ? 'COUNTDOWN: $countdown' : 'COUNTDOWN: 1';
-      _setPromptState(PromptState.PAUSE_TIMER_RUNNING, cdText);
     } else {
-      _setPromptState(PromptState.PAUSE_TIMER_RUNNING, 'Silence >= ${currentPauseSeconds}s (Timeout in ${(_promptTimeout - currentPauseSeconds)}s)');
+      final countdown = 3 - ((idleMs - (targetTimeoutMs - 3000)) ~/ 1000);
+      if (idleMs >= targetTimeoutMs - 3000 && countdown > 0) {
+         _setPromptState(PromptState.PAUSE_TIMER_RUNNING, 'COUNTDOWN: $countdown');
+      } else {
+         _setPromptState(PromptState.PAUSE_TIMER_RUNNING, 'Silence >= ${currentPauseSeconds}s (Timeout in ${((targetTimeoutMs/1000) - currentPauseSeconds).toInt()}s)');
+      }
     }
   }
 
@@ -252,12 +263,9 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
      }
   }
   
-  void _playPromptAudio(int surah, int ayah, {bool forceRepeat = false}) {
+  void _playPromptAudio(String audioUrl, {bool forceRepeat = false}) {
       if (_audioPlayedForCurrentPause && !forceRepeat) return;
       _audioPlayedForCurrentPause = true;
-      String s = surah.toString().padLeft(3, '0');
-      String a = ayah.toString().padLeft(3, '0');
-      String audioUrl = "https://everyayah.com/data/Alafasy_128kbps/$s$a.mp3";
       _addLog('[PROMPT] Audio Download Started: $audioUrl');
       _audioPlayer.setUrl(audioUrl).then((_) {
          _addLog('[PROMPT] Audio Playback Start');
@@ -289,6 +297,17 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
       _connectionStatus = 'Connected';
       _recognitionStatus = 'Ready. Press mic to start.';
       _addLog('WebSocket connected and ready.');
+    } else if (type == 'prompt_data') {
+      if (mounted) {
+        setState(() {
+          _promptText = event['text'] ?? '';
+          _assistedAyah = event['ayah'] ?? 0;
+        });
+      }
+      final audioUrl = event['audio_url'];
+      if (audioUrl != null) {
+        _playPromptAudio(audioUrl);
+      }
     } else if (type == 'verse_match') {
       int newSurah = event['surah'] ?? 0;
       int newAyah = event['ayah'] ?? 0;
@@ -309,12 +328,10 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
       }
       
       setState(() {
-         if (_currentSurah > 0 && _currentAyah > 0 && _confidence >= 0.8) {
-            _lastSurah = _currentSurah;
-            _lastAyah = _currentAyah;
-         }
          _currentSurah = newSurah;
          _currentAyah = newAyah;
+         _expectedSurah = newSurah;
+         _expectedAyah = newAyah + 1; // Expect next ayah after match
          _confidence = event['confidence'] ?? 0.0;
          _surahNameEn = event['surah_name_en'] ?? '';
          _surahNameAr = event['surah_name'] ?? '';
@@ -499,6 +516,11 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
         _taraweehModeEnabled = true;
         _currentSurah = surah;
         _currentAyah = ayah;
+        _expectedSurah = surah;
+        _expectedAyah = ayah;
+        _currentAyahText = '';
+        _nextAyahText = '';
+        _promptText = '';
       });
       _addLog('Taraweeh Mode configured for $surah:$ayah');
       if (!_isListening) {
@@ -930,7 +952,7 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
                          const Icon(Icons.volume_up, color: Colors.orange, size: 48),
                          const SizedBox(height: 8),
                          Text(
-                           _nextAyahText.isNotEmpty ? _nextAyahText : _currentAyahText,
+                           _promptText.isNotEmpty ? _promptText : (_nextAyahText.isNotEmpty ? _nextAyahText : _currentAyahText),
                            textAlign: TextAlign.center,
                            textDirection: TextDirection.rtl,
                            style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, fontFamily: 'Amiri'),

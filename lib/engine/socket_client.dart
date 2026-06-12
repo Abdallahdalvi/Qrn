@@ -245,6 +245,16 @@ class TarteelSocketClient {
     }
   }
 
+  void requestPrompt(int surah, int ayah) {
+    if (_socket != null && _isReady && _socket!.readyState == WebSocket.open) {
+      _socket!.add(jsonEncode({
+        "type": "request_prompt",
+        "surah": surah,
+        "ayah": ayah
+      }));
+    }
+  }
+
   void clearAssistedPrompt() {
     if (_socket != null && _isReady && _socket!.readyState == WebSocket.open) {
       _socket!.add(jsonEncode({
