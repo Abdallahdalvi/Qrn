@@ -127,7 +127,7 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
     _loadSettings();
     
     // Auto-start listening on app launch
-    Future.microtask(() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_isListening) {
         _toggleListening();
       }
