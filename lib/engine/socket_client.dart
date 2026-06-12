@@ -195,7 +195,6 @@ class TarteelSocketClient {
   void processAudioChunk(List<int> pcm16Bytes) {
     try {
       if (_socket != null && _isReady && _socket!.readyState == WebSocket.open) {
-        globalLogger.log('WEBSOCKET SEND');
         _socket!.add(pcm16Bytes);
       } else {
         // Buffer audio if disconnected, drop if it exceeds MAX_BUFFER_SIZE

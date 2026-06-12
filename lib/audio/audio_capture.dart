@@ -53,8 +53,6 @@ class AudioCaptureService {
       );
       
       _streamSub = stream.listen((data) {
-        globalLogger.log('AUDIO CHUNK GENERATED');
-        globalLogger.log('AUDIO CHUNK SIZE: ${data.length}');
         _audioStreamController.add(data);
       }, onError: (err, stack) {
         globalLogger.logError('AudioCaptureService Stream Error: [${err.runtimeType}] $err', stack);
