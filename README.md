@@ -7,10 +7,7 @@ A highly advanced AI-powered Quran recitation assistant that automatically track
 1. **Install the App:** Download the latest `app-release.apk` (found in `build/app/outputs/flutter-apk/`) to your Android device and install it.
 2. **Start the Backend Engine (For PC Hosting):**
    - Make sure you have Python installed.
-   - Run the backend AI engine from the project folder:
-     ```bash
-     .\.venv\Scripts\python.exe backend.py
-     ```
+   - Simply double-click the `start_backend.bat` file in the main folder to automatically launch the AI engine.
 3. **Connect Your Phone:**
    - Make sure your phone and your PC are on the **same Wi-Fi network**.
    - Open the App on your phone.
