@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tarteel Engine Headless</title>
+  <script>
+    window.onerror = function(message, source, lineno, colno, error) {
+      var errMsg = 'HTML Error: ' + message + ' at ' + source + ':' + lineno;
+      if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
+        window.flutter_inappwebview.callHandler('onEngineEvent', {
+          type: 'error', 
+          message: errMsg
+        });
+      } else {
+        console.error(errMsg);
+      }
+    };
+  </script>
+</head>
+<body>
+  <script src="engine.js"></script>
+  <script>
+    function getAssetsUrl() {
+      var href = window.location.href;
+      return href.substring(0, href.lastIndexOf('/'));
+    }
+
+    function tryInit() {
+      if (window._engineInitialized) return;
+      if (window.initEngine) {
+        window._engineInitialized = true;
+        var assetsUrl = getAssetsUrl();
+        console.log("Initializing engine with assetsUrl: " + assetsUrl);
+        window.initEngine(assetsUrl);
+      } else {
+        console.error("window.initEngine is undefined. engine.js might not have finished loading.");
+      }
+    }
+
+    window.addEventListener("flutterInAppWebViewPlatformReady", function(event) {
+      console.log("flutterInAppWebViewPlatformReady received");
+      tryInit();
+    });
+
+    // Fallback if platform ready already fired or we are debugging in browser
+    setTimeout(function() {
+      console.log("Timeout fallback checking engine initialization");
+      tryInit();
+    }, 2000);
+  </script>
+</body>
+</html>
