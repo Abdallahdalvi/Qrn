@@ -64,6 +64,7 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
   int _assistedAyah = 0;
   Timer? _promptLoopTimer;
   StreamSubscription<Amplitude>? _ampSub;
+  int _lastLoggedPauseSecond = -1;
   
   bool _isMutashabihat = false;
   final AudioPlayer _audioPlayer = AudioPlayer();
@@ -181,6 +182,12 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
     
     final idleMs = idleTimeSpeech < idleTimeProgression ? idleTimeSpeech : idleTimeProgression;
     
+    int currentPauseSeconds = idleMs ~/ 1000;
+    if (currentPauseSeconds > 0 && currentPauseSeconds != _lastLoggedPauseSecond && !_isSpeaking) {
+        _lastLoggedPauseSecond = currentPauseSeconds;
+        _addLog('[PAUSE] timer = $currentPauseSeconds');
+    }
+    
     final totalTimeoutMs = _promptTimeout * 1000;
     final level1Ms = (totalTimeoutMs / 3).round();
     final level2Ms = (totalTimeoutMs * 2 / 3).round();
@@ -190,6 +197,7 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
       if (_promptRepeatCount > _promptMaxRepeats) {
          _setPromptState('Waiting for recitation...');
       } else if (_promptRepeatCount == 0 && _promptState != 'PLAYING AUDIO') {
+         _addLog('[PROMPT] triggered');
          _setPromptState('PLAYING AUDIO');
          setState(() {
            _assistedAyah = _currentAyah + 1;
@@ -198,6 +206,7 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
          _playPromptAudio();
       } else if (_promptRepeatCount > 0 && _promptRepeatCount <= _promptMaxRepeats) {
          if (_promptState != 'PLAYING AUDIO (Repeat $_promptRepeatCount)') {
+            _addLog('[PROMPT] triggered (Repeat $_promptRepeatCount)');
             _setPromptState('PLAYING AUDIO (Repeat $_promptRepeatCount)');
             _playPromptAudio(forceRepeat: true);
          }
@@ -390,15 +399,17 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
         
         _ampSub = widget.audioService.onAmplitude.listen((amp) {
            _currentRMS = amp.current;
-           if (amp.current > -35.0) {
+           if (amp.current > -20.0) { // Increased VAD Threshold
              if (!_isSpeaking) {
-               _addLog('[Prompt] Speech Started. RMS: ${_currentRMS.toStringAsFixed(1)}');
+               _addLog('[SPEECH] detected');
+               _lastLoggedPauseSecond = -1;
              }
              _isSpeaking = true;
              _lastSpeechTime = DateTime.now();
            } else {
              if (_isSpeaking) {
-               _addLog('[Prompt] Speech Ended. Silence Detected.');
+               _addLog('[SPEECH] ended');
+               _addLog('[PAUSE] timer started');
              }
              _isSpeaking = false;
            }
@@ -645,13 +656,14 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
                             crossAxisAlignment: CrossAxisAlignment.stretch,
                             children: [
                               Text('--- DIAGNOSTICS ---', style: TextStyle(color: Colors.yellow, fontWeight: FontWeight.bold, fontSize: 16)),
+                              Text('Recording: ${_isListening ? "YES" : "NO"}', style: TextStyle(color: Colors.white, fontSize: 14)),
+                              Text('Speech Detected: ${_isSpeaking ? "TRUE" : "FALSE"}', style: TextStyle(color: Colors.cyanAccent, fontSize: 14, fontWeight: FontWeight.bold)),
+                              Text('Audio RMS: ${_currentRMS.toStringAsFixed(2)} dB (Threshold: -20.0)', style: TextStyle(color: Colors.white, fontSize: 14)),
                               Text('Tracking State: $_trackingMode', style: TextStyle(color: Colors.white, fontSize: 14)),
                               Text('Tracking Locked: ${_trackingMode.contains("LOCKED") || _trackingMode == "NORMAL"}', style: TextStyle(color: Colors.white, fontSize: 14)),
                               Text('Confidence: ${(_confidence * 100).toStringAsFixed(0)}%', style: TextStyle(color: Colors.white, fontSize: 14)),
                               SizedBox(height: 8),
                               Text('Prompt State: $_promptState', style: TextStyle(color: Colors.orangeAccent, fontSize: 14, fontWeight: FontWeight.bold)),
-                              Text('Speech Detected: ${_isSpeaking ? "YES" : "NO"}', style: TextStyle(color: Colors.white, fontSize: 14)),
-                              Text('Audio RMS: ${_currentRMS.toStringAsFixed(2)} dB (Threshold: -35.0)', style: TextStyle(color: Colors.white, fontSize: 14)),
                               Text('Pause Timer: ${(_isListening ? DateTime.now().difference(_lastSpeechTime).inMilliseconds / 1000 : 0.0).toStringAsFixed(1)} s', style: TextStyle(color: Colors.white, fontSize: 14)),
                               SizedBox(height: 8),
                               ElevatedButton(
