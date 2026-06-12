@@ -195,6 +195,7 @@ class TarteelSocketClient {
   void processAudioChunk(List<int> pcm16Bytes) {
     try {
       if (_socket != null && _isReady && _socket!.readyState == WebSocket.open) {
+        globalLogger.log('WEBSOCKET SEND');
         _socket!.add(pcm16Bytes);
       } else {
         // Buffer audio if disconnected, drop if it exceeds MAX_BUFFER_SIZE
@@ -223,46 +224,24 @@ class TarteelSocketClient {
   }
 
   void startTaraweeh(int surah, int ayah) {
-    try {
-      _isTaraweehActive = true;
-      _taraweehSurah = surah;
-      _taraweehAyah = ayah;
-      if (_socket != null && _isReady && _socket!.readyState == WebSocket.open) {
-        _socket!.add(jsonEncode({
-          "type": "start_taraweeh",
-          "surah": surah,
-          "ayah": ayah
-        }));
-      }
-    } catch (e, stack) {
-      globalLogger.logError('Exception in startTaraweeh: $e', stack);
+    _isTaraweehActive = true;
+    _taraweehSurah = surah;
+    _taraweehAyah = ayah;
+    if (_socket != null && _isReady && _socket!.readyState == WebSocket.open) {
+      _socket!.add(jsonEncode({
+        "type": "start_taraweeh",
+        "surah": surah,
+        "ayah": ayah
+      }));
     }
   }
 
   void sendAssistedPrompt(int ayah) {
-    try {
-      if (_socket != null && _isReady && _socket!.readyState == WebSocket.open) {
-        _socket!.add(jsonEncode({
-          "type": "assisted_prompt",
-          "ayah": ayah
-        }));
-      }
-    } catch (e, stack) {
-      globalLogger.logError('Exception in sendAssistedPrompt: $e', stack);
-    }
-  }
-
-  void requestPrompt(int surah, int ayah) {
-    try {
-      if (_socket != null && _isReady && _socket!.readyState == WebSocket.open) {
-        _socket!.add(jsonEncode({
-          "type": "prompt_request",
-          "surah": surah,
-          "ayah": ayah
-        }));
-      }
-    } catch (e, stack) {
-      globalLogger.logError('Exception in requestPrompt: $e', stack);
+    if (_socket != null && _isReady && _socket!.readyState == WebSocket.open) {
+      _socket!.add(jsonEncode({
+        "type": "assisted_prompt",
+        "ayah": ayah
+      }));
     }
   }
 

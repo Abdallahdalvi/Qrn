@@ -27,7 +27,7 @@ class GlobalLogger {
   }
 
   void logError(Object error, [StackTrace? stackTrace]) {
-    log('ERROR:\n$error\n\nSTACK TRACE:\n$stackTrace', isError: true);
+    log('$error\n$stackTrace', isError: true);
   }
 }
 

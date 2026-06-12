@@ -539,42 +539,24 @@ async def websocket_recitation(websocket: WebSocket):
                             assisted_ayah = 0
                             post_recovery_lock = False
                             print(f"[Backend] Taraweeh mode started: Surah {current_surah}, Ayah {current_ayah}")
+                            verse = next((v for v in _verses if v["surah"] == current_surah and v["ayah"] == current_ayah), None)
+                            if verse:
+                                await websocket.send_json({
+                                    "type": "assisted_verse_text",
+                                    "ayah_text": verse.get("text", "")
+                                })
                         elif cmd.get("type") == "assisted_prompt":
                             assisted_ayah = cmd.get("ayah", 0)
                             print(f"[Backend] Assisted prompt activated for Ayah {assisted_ayah}")
+                            verse = next((v for v in _verses if v["surah"] == current_surah and v["ayah"] == assisted_ayah), None)
+                            if verse:
+                                await websocket.send_json({
+                                    "type": "assisted_verse_text",
+                                    "ayah_text": verse.get("text", "")
+                                })
                         elif cmd.get("type") == "clear_assisted_prompt":
                             assisted_ayah = 0
                             print("[Backend] Assisted prompt cleared")
-                        elif cmd.get("type") == "request_prompt":
-                            req_s = cmd.get("surah", 1)
-                            req_a = cmd.get("ayah", 1)
-                            v_text = ""
-                            found = False
-                            for v in _verses:
-                                if v.get("surah_number") == req_s and v.get("ayah_number") == req_a:
-                                    v_text = v.get("text_uthmani", v.get("text", ""))
-                                    found = True
-                                    break
-                            if not found:
-                                req_s += 1
-                                req_a = 1
-                                for v in _verses:
-                                    if v.get("surah_number") == req_s and v.get("ayah_number") == req_a:
-                                        v_text = v.get("text_uthmani", v.get("text", ""))
-                                        found = True
-                                        break
-                            if found:
-                                s_str = str(req_s).zfill(3)
-                                a_str = str(req_a).zfill(3)
-                                audio_url = f"https://everyayah.com/data/Alafasy_128kbps/{s_str}{a_str}.mp3"
-                                await websocket.send_json({
-                                    "type": "prompt_data",
-                                    "surah": req_s,
-                                    "ayah": req_a,
-                                    "text": v_text,
-                                    "audio_url": audio_url
-                                })
-                                print(f"[Backend] Sent prompt data for {req_s}:{req_a}")
                         else:
                             print(f"[Backend] Unknown text command: {text_data}")
                     except Exception as e:
