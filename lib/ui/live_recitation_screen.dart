@@ -126,12 +126,7 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen> {
     _initEngine();
     _loadSettings();
     
-    // Auto-start listening on app launch
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_isListening) {
-        _toggleListening();
-      }
-    });
+
   }
 
   Future<void> _loadSettings() async {
