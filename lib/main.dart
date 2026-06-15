@@ -8,47 +8,45 @@ import 'ui/live_recitation_screen.dart';
 import 'ui/surah_index_screen.dart';
 
 void main() async {
-  runZonedGuarded(() async {
-    WidgetsFlutterBinding.ensureInitialized();
-    
-    // Catch Flutter framework errors
-    FlutterError.onError = (FlutterErrorDetails details) {
-      FlutterError.presentError(details);
-      globalLogger.logError(details.exception, details.stack);
-    };
+  runZonedGuarded(
+    () async {
+      WidgetsFlutterBinding.ensureInitialized();
 
-    // Catch unhandled asynchronous errors
-    PlatformDispatcher.instance.onError = (error, stack) {
+      // Catch Flutter framework errors
+      FlutterError.onError = (FlutterErrorDetails details) {
+        FlutterError.presentError(details);
+        globalLogger.logError(details.exception, details.stack);
+      };
+
+      // Catch unhandled asynchronous errors
+      PlatformDispatcher.instance.onError = (error, stack) {
+        globalLogger.logError(error, stack);
+        return true; // Prevent default crash behavior
+      };
+
+      final engine = TarteelSocketClient();
+      final audioService = AudioCaptureService();
+
+      runApp(AlfatihApp(engine: engine, audioService: audioService));
+    },
+    (error, stack) {
       globalLogger.logError(error, stack);
-      return true; // Prevent default crash behavior
-    };
-    
-    final engine = TarteelSocketClient();
-    final audioService = AudioCaptureService();
-
-    runApp(AlfatihApp(engine: engine, audioService: audioService));
-  }, (error, stack) {
-    globalLogger.logError(error, stack);
-  });
+    },
+  );
 }
 
 class AlfatihApp extends StatelessWidget {
   final TarteelSocketClient engine;
   final AudioCaptureService audioService;
 
-  const AlfatihApp({
-    Key? key,
-    required this.engine,
-    required this.audioService,
-  }) : super(key: key);
+  const AlfatihApp({Key? key, required this.engine, required this.audioService})
+    : super(key: key);
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Al-Fatih Alal-Imaam',
-      theme: ThemeData(
-        primarySwatch: Colors.blue,
-      ),
+      theme: ThemeData(primarySwatch: Colors.blue),
       home: MainAppScreen(engine: engine, audioService: audioService),
     );
   }
@@ -70,19 +68,31 @@ class MainAppScreen extends StatefulWidget {
 
 class _MainAppScreenState extends State<MainAppScreen> {
   int _currentIndex = 0;
+  late final List<Widget> _screens;
+
+  @override
+  void initState() {
+    super.initState();
+    _screens = [
+      LiveRecitationScreen(
+        engine: widget.engine,
+        audioService: widget.audioService,
+      ),
+      const SurahIndexScreen(),
+    ];
+  }
+
+  @override
+  void dispose() {
+    unawaited(widget.audioService.dispose());
+    unawaited(widget.engine.dispose());
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final screens = [
-      LiveRecitationScreen(engine: widget.engine, audioService: widget.audioService),
-      const SurahIndexScreen(),
-    ];
-
     return Scaffold(
-      body: IndexedStack(
-        index: _currentIndex,
-        children: screens,
-      ),
+      body: IndexedStack(index: _currentIndex, children: _screens),
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _currentIndex,
         onTap: (index) {
