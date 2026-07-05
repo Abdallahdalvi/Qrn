@@ -49,6 +49,7 @@ interface RetrievalOptions {
   singleLimit?: number;
   topSurahs?: number;
   spanLimit?: number;
+  allowedSurah?: number | null;
 }
 
 const JOINT_TOP_K_LEVENSHTEIN = 18;
@@ -217,6 +218,7 @@ export class QuranDB {
       singleLimit = 32,
       topSurahs = 3,
       spanLimit = 32,
+      allowedSurah = null,
     }: RetrievalOptions = {},
   ): CandidateRetrieval {
     if (!text.trim()) {
@@ -229,6 +231,7 @@ export class QuranDB {
     const scored: [QuranVerse, number, number, number][] = [];
 
     for (const v of this.verses) {
+      if (allowedSurah !== null && v.surah !== allowedSurah) continue;
       let raw = ratio(text, v.phonemes_joined);
       const verseWords = v.phoneme_words;
       const sharedWordCount = Math.min(textWords.length, verseWords.length);
@@ -326,6 +329,7 @@ export class QuranDB {
     maxSpan = 3,
     hint: [number, number] | null = null,
     returnTopK = 0,
+    allowedSurah: number | null = null,
   ): Record<string, any> | null {
     const retrieved = this.retrieveCandidates(text, {
       maxSpan,
@@ -333,6 +337,7 @@ export class QuranDB {
       singleLimit: Math.max(returnTopK, 5),
       topSurahs: 20,
       spanLimit: 64,
+      allowedSurah,
     });
 
     const ranked = retrieved.combined

@@ -1,7 +1,7 @@
 import { RecitationRecognizer, RecognitionResult } from '../RecitationRecognizer';
 import { TarteelEngine } from '../tarteel-engine/engine';
 import type { InferenceSession, Tensor } from 'onnxruntime-common';
-import type { QuranVerse } from '../tarteel-engine/lib/types';
+import type { QuranVerse, WorkerOutbound } from '../tarteel-engine/lib/types';
 
 export interface AssetLoader {
   loadVocab(): Promise<Record<string, string>>;
@@ -16,6 +16,7 @@ export class TarteelProvider implements RecitationRecognizer {
   private isListening: boolean = false;
   private assetLoader: AssetLoader;
   private onResultCallback: ((result: RecognitionResult) => void) | null = null;
+  private onMessageCallback: ((message: WorkerOutbound) => void) | null = null;
 
   constructor(assetLoader: AssetLoader) {
     this.assetLoader = assetLoader;
@@ -23,13 +24,21 @@ export class TarteelProvider implements RecitationRecognizer {
 
   public async initialize(): Promise<void> {
     console.log('Initializing TarteelProvider...');
+    this.onMessageCallback?.({ type: 'loading_status', message: 'Loading phoneme vocabulary...' });
     const vocab = await this.assetLoader.loadVocab();
+    this.onMessageCallback?.({ type: 'loading_status', message: 'Loading Quran phoneme index...' });
     const quranData = await this.assetLoader.loadQuranData();
+    this.onMessageCallback?.({ type: 'loading_status', message: 'Loading recognition model...' });
     const modelBuffer = await this.assetLoader.loadModel();
     const OrtSession = this.assetLoader.getOrtSessionClass();
     const OrtTensor = this.assetLoader.getOrtTensorClass();
 
-    const session = await OrtSession.create(modelBuffer);
+    this.onMessageCallback?.({ type: 'loading_status', message: 'Starting ONNX Runtime session...' });
+    const session = await OrtSession.create(modelBuffer, {
+      executionProviders: ['wasm'],
+      graphOptimizationLevel: 'all',
+      executionMode: 'sequential',
+    });
     
     this.engine = new TarteelEngine(vocab, quranData, session, OrtTensor, (event) => {
       // Diagnostic events from the tracker
@@ -68,10 +77,41 @@ export class TarteelProvider implements RecitationRecognizer {
     this.onResultCallback = onResult;
   }
 
+  public onResult(onResult: (result: RecognitionResult) => void): void {
+    this.onResultCallback = onResult;
+    this.isListening = true;
+  }
+
+  public onMessage(onMessage: (message: WorkerOutbound) => void): void {
+    this.onMessageCallback = onMessage;
+    this.isListening = true;
+  }
+
   public async stopListening(): Promise<void> {
     console.log('TarteelProvider stopped listening.');
     this.isListening = false;
     this.onResultCallback = null;
+    this.onMessageCallback = null;
+  }
+
+  public endAudioStream(): void {
+    this.engine?.reset();
+    this.isListening = true;
+  }
+
+  public resetAudioStream(): void {
+    this.engine?.reset();
+    this.isListening = true;
+  }
+
+  public startTaraweeh(surah: number, ayah: number): void {
+    this.engine?.setTaraweehLock(surah, ayah);
+    this.isListening = true;
+  }
+
+  public stopTaraweeh(): void {
+    this.engine?.clearTaraweehLock();
+    this.isListening = true;
   }
 
   public async processAudioChunk(samples: Float32Array): Promise<void> {
@@ -82,12 +122,13 @@ export class TarteelProvider implements RecitationRecognizer {
     
     // We can also parse the direct Word_progress / Verse_match messages here
     for (const msg of messages) {
+      this.onMessageCallback?.(msg);
       if (msg.type === 'word_progress' && this.onResultCallback) {
         this.onResultCallback({
           surah: msg.surah,
           ayah: msg.ayah,
           wordPosition: msg.word_index,
-          confidenceScore: 0.95
+          confidenceScore: msg.confidence ?? 0.95
         });
       } else if (msg.type === 'verse_match' && this.onResultCallback) {
         this.onResultCallback({

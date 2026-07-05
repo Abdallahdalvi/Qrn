@@ -106,6 +106,11 @@ interface HypothesisCycle {
   candidates: VerseCandidate[];
 }
 
+interface TaraweehLock {
+  surah: number;
+  ayah: number;
+}
+
 export type TrackerDiagnosticEvent =
   | {
       type: "discovery_cycle";
@@ -513,12 +518,32 @@ export class RecitationTracker {
   private totalSamplesFed = 0;
   private samplesAtAdvance = 0;
   private hypothesis = new StreamingHypothesis();
+  private taraweehLock: TaraweehLock | null = null;
 
   constructor(
     private db: QuranDB,
     private transcribe: TranscribeFn,
     private options: RecitationTrackerOptions = {},
   ) {}
+
+  setTaraweehLock(surah: number, ayah: number): void {
+    const safeSurah = Math.max(1, Math.min(114, Math.floor(surah)));
+    const safeAyah = Math.max(1, Math.floor(ayah));
+    this.taraweehLock = { surah: safeSurah, ayah: safeAyah };
+    this._resetRecognitionState();
+    this.lastEmittedRef = [safeSurah, safeAyah - 1];
+    this.lastEmittedText = "";
+    this.lastCommitEvidence = {
+      confidence: 1,
+      acousticMargin: 1,
+      strong: true,
+    };
+  }
+
+  clearTaraweehLock(): void {
+    this.taraweehLock = null;
+    this._resetRecognitionState();
+  }
 
   async feed(samples: Float32Array): Promise<WorkerOutbound[]> {
     const messages: WorkerOutbound[] = [];
@@ -697,6 +722,7 @@ export class RecitationTracker {
     this.trackingProgressEstablished = true;
     this.trackingLastWordIdx = matchedIndices[matchedIndices.length - 1];
     const wordPos = this.trackingLastWordIdx + 1;
+    const cumulativeCoverage = wordPos / this.trackingVerseWords.length;
 
     messages.push({
       type: "word_progress",
@@ -722,7 +748,6 @@ export class RecitationTracker {
       });
     }
 
-    const cumulativeCoverage = wordPos / this.trackingVerseWords.length;
     const finalWordReached =
       this.trackingLastWordIdx >= this.trackingVerseWords.length - 1;
     if (cumulativeCoverage >= TRACKING_COMPLETION_COVERAGE && finalWordReached) {
@@ -849,11 +874,26 @@ export class RecitationTracker {
     this.cyclesSinceCommit++;
 
     const result = await this.transcribe(this.utteranceAudio.slice());
-    const text = result.text.trim();
+    const lockedSurah = this.taraweehLock?.surah ?? null;
+    const championInLock =
+      !lockedSurah ||
+      !result.championMatch ||
+      result.championMatch.surah === lockedSurah;
+    const text = (championInLock ? result.text : result.rawPhonemes).trim();
     if (!text || text.length < 5) {
+      const heard = (result.rawPhonemes || result.text || "").trim();
+      if (heard) {
+        messages.push({
+          type: "raw_transcript",
+          text: heard,
+          confidence: 0,
+        });
+      }
       // Short-utterance rescue: use CTC rescoring against short-verse candidates
       if (result.acoustic && (result.tokenIds?.length ?? 0) >= 2 && this.cyclesSinceCommit > 1) {
-        const shortCandidates = this.db.getShortVerseCandidates();
+        const shortCandidates = this.db
+          .getShortVerseCandidates()
+          .filter((candidate) => !lockedSurah || candidate.surah === lockedSurah);
         if (shortCandidates.length > 0) {
           const scored = scoreCtcCandidates(
             result.acoustic,
@@ -928,13 +968,14 @@ export class RecitationTracker {
       }
     }
 
-    const championMatch = result.championMatch ?? null;
+    const championMatch = championInLock ? result.championMatch ?? null : null;
     const match = championMatch ?? this.db.matchVerse(
       text,
       RAW_TRANSCRIPT_THRESHOLD,
       DISCOVERY_MAX_SPAN,
       this.lastEmittedRef,
       5,
+      lockedSurah,
     );
     // Expand candidate set when text match is unreliable
     const textConfidenceLow = !match || match.score < ACOUSTIC_OVERRIDE_TEXT_THRESHOLD;
@@ -947,6 +988,7 @@ export class RecitationTracker {
       singleLimit,
       topSurahs: textConfidenceLow ? 10 : DISCOVERY_TOP_SURAHS,
       spanLimit: DISCOVERY_TOP_SINGLE_CANDIDATES,
+      allowedSurah: lockedSurah,
     });
 
     const ranked = this._rankCandidates(retrieved.combined, result);
@@ -1061,7 +1103,10 @@ export class RecitationTracker {
       }
     }
 
-    const threshold = this.lastEmittedRef ? VERSE_MATCH_THRESHOLD : FIRST_MATCH_THRESHOLD;
+    const threshold =
+      this.lastEmittedRef || lockedSurah
+        ? VERSE_MATCH_THRESHOLD
+        : FIRST_MATCH_THRESHOLD;
 
     if (effectiveMatch && effectiveScore >= threshold) {
       const key = refKey(effectiveMatch.surah, effectiveMatch.ayah, effectiveMatch.ayah_end);
@@ -1252,6 +1297,18 @@ export class RecitationTracker {
         });
       }
     } else {
+      const candidateMessage = effectiveMatch
+        ? this._candidateMessage(
+            effectiveMatch as any,
+            effectiveScore,
+            ranked,
+            false,
+            finalFlush,
+          )
+        : null;
+      if (candidateMessage) {
+        messages.push(candidateMessage);
+      }
       const score = effectiveMatch ? Math.round(effectiveScore * 100) / 100 : 0;
       messages.push({
         type: "raw_transcript",
@@ -1548,6 +1605,32 @@ export class RecitationTracker {
     this.didFinalFlush = false;
     this.pendingLeader = null;
     this.lastRawPhonemes = null;
+    this.hypothesis.reset();
+  }
+
+  private _resetRecognitionState(): void {
+    this.utteranceAudio = new Float32Array(0);
+    this.newAudioCount = 0;
+    this.silenceSamples = 0;
+    this.utteranceHasSpeech = false;
+    this.didFinalFlush = false;
+    this.lastEmittedRef = null;
+    this.lastEmittedText = "";
+    this.prevEmittedRef = null;
+    this.prevEmittedText = "";
+    this.pendingLeader = null;
+    this.lastCommitEvidence = null;
+    this.trackingVerse = null;
+    this.trackingVerseWords = [];
+    this.trackingPrefixes = [];
+    this.trackingLastWordIdx = -1;
+    this.trackingProgressEstablished = false;
+    this.staleCycles = 0;
+    this.cyclesSinceCommit = Infinity;
+    this.lastTrackingResult = null;
+    this.consecutiveAutoAdvances = 0;
+    this.lastRawPhonemes = null;
+    this._clearPendingEmission();
     this.hypothesis.reset();
   }
 

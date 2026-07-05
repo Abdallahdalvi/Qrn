@@ -21,7 +21,7 @@
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
-    "onnxruntime-common": "^1.26.0",
-    "onnxruntime-web": "^1.26.0"
+    "onnxruntime-common": "1.18.0",
+    "onnxruntime-web": "1.18.0"
   }
 }

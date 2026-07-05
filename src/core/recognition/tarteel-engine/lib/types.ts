@@ -46,6 +46,7 @@ export interface WordProgressMessage {
   word_index: number;
   total_words: number;
   matched_indices: number[];
+  confidence?: number;
 }
 
 export interface WordCorrection {

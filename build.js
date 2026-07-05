@@ -9,8 +9,12 @@ if (!fs.existsSync(outDir)) {
   fs.mkdirSync(outDir, { recursive: true });
 }
 
-// Write an enhanced HTML wrapper with console redirects, error traps, dynamic path resolution, and ready listener.
-const htmlContent = `<!DOCTYPE html>
+// Write an enhanced HTML wrapper with console redirects, error traps, dynamic
+// path resolution, and retry-based startup. The engine bundle is inlined so
+// Android WebView cannot race or fail a separate engine.js asset request.
+function createHtmlContent(engineScript) {
+  const safeEngineScript = engineScript.replace(/<\/script/gi, '<\\/script');
+  return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -31,13 +35,16 @@ const htmlContent = `<!DOCTYPE html>
   </script>
 </head>
 <body>
-  <script src="engine.js"></script>
+  <script>
+${safeEngineScript}
+  </script>
   <script>
     function getAssetsUrl() {
       var href = window.location.href;
       return href.substring(0, href.lastIndexOf('/'));
     }
 
+    var initAttempts = 0;
     function tryInit() {
       if (window._engineInitialized) return;
       if (window.initEngine) {
@@ -46,7 +53,12 @@ const htmlContent = `<!DOCTYPE html>
         console.log("Initializing engine with assetsUrl: " + assetsUrl);
         window.initEngine(assetsUrl);
       } else {
-        console.error("window.initEngine is undefined. engine.js might not have finished loading.");
+        initAttempts++;
+        if (initAttempts <= 120) {
+          setTimeout(tryInit, 500);
+        } else {
+          console.error("window.initEngine is undefined after waiting for engine bundle startup.");
+        }
       }
     }
 
@@ -63,7 +75,7 @@ const htmlContent = `<!DOCTYPE html>
   </script>
 </body>
 </html>`;
-fs.writeFileSync(path.join(outDir, 'index.html'), htmlContent);
+}
 
 const hfAudioPlugin = {
   name: 'hf-audio-plugin',
@@ -78,6 +90,10 @@ const nodePolyfillPlugin = {
   name: 'node-polyfill-plugin',
   setup(build) {
     const emptyStubPath = path.resolve(__dirname, 'src', 'stubs', 'empty.ts');
+    const onnxNodeStubPath = path.resolve(__dirname, 'src', 'stubs', 'onnxruntime-node.ts');
+    build.onResolve({ filter: /^onnxruntime-node$/ }, () => {
+      return { path: onnxNodeStubPath };
+    });
     // Stub native Node modules (and their subpaths/promises) to prevent runtime dynamic require exceptions in the browser.
     build.onResolve({ filter: /^(node:)?(fs|path|url|crypto|stream|util)(\/.*)?$/ }, args => {
       return { path: emptyStubPath };
@@ -90,14 +106,15 @@ esbuild.build({
   bundle: true,
   outfile: path.join(outDir, 'engine.js'),
   minify: true,
-  sourcemap: true,
+  sourcemap: false,
   target: ['chrome100', 'safari15'],
   format: 'iife',
   globalName: 'TarteelApp',
   platform: 'browser',
-  external: ['onnxruntime-node'],
   plugins: [hfAudioPlugin, nodePolyfillPlugin],
 }).then(() => {
+  const engineScript = fs.readFileSync(path.join(outDir, 'engine.js'), 'utf8');
+  fs.writeFileSync(path.join(outDir, 'index.html'), createHtmlContent(engineScript));
   console.log('Build completed successfully.');
 }).catch((err) => {
   console.error('Build failed:', err);

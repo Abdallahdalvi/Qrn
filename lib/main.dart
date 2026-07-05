@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'core/global_logger.dart';
+import 'engine/recitation_engine.dart';
 import 'engine/socket_client.dart';
 import 'audio/audio_capture.dart';
 import 'ui/live_recitation_screen.dart';
@@ -36,7 +37,7 @@ void main() async {
 }
 
 class AlfatihApp extends StatelessWidget {
-  final TarteelSocketClient engine;
+  final RecitationEngine engine;
   final AudioCaptureService audioService;
 
   const AlfatihApp({Key? key, required this.engine, required this.audioService})
@@ -53,7 +54,7 @@ class AlfatihApp extends StatelessWidget {
 }
 
 class MainAppScreen extends StatefulWidget {
-  final TarteelSocketClient engine;
+  final RecitationEngine engine;
   final AudioCaptureService audioService;
 
   const MainAppScreen({

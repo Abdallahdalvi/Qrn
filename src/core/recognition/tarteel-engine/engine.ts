@@ -100,6 +100,8 @@ export class TarteelEngine {
   private trie: CompactTrie;
   private tracker: RecitationTracker;
   private debugEnabled = false;
+  private onTrackerEvent?: (event: TrackerDiagnosticEvent) => void;
+  private taraweehLock: { surah: number; ayah: number } | null = null;
 
   constructor(
     vocabJson: Record<string, string>,
@@ -109,6 +111,7 @@ export class TarteelEngine {
     onTrackerEvent?: (event: TrackerDiagnosticEvent) => void
   ) {
     setSession(ortSession, ortTensor);
+    this.onTrackerEvent = onTrackerEvent;
     this.decoder = new CTCDecoder(vocabJson);
     this.db = new QuranDB(quranData, this.decoder);
     
@@ -116,13 +119,35 @@ export class TarteelEngine {
     const built = buildTrie(quranData, vocabJson, 3);
     this.trie = built.trie;
 
-    this.tracker = new RecitationTracker(this.db, this.transcribe.bind(this), {
-      onDiagnostic: onTrackerEvent,
-    });
+    this.tracker = this.createTracker();
   }
 
   public async feedAudio(samples: Float32Array): Promise<WorkerOutbound[]> {
     return await this.tracker.feed(samples);
+  }
+
+  public reset(): void {
+    this.tracker = this.createTracker();
+  }
+
+  public setTaraweehLock(surah: number, ayah: number): void {
+    this.taraweehLock = { surah, ayah };
+    this.tracker.setTaraweehLock(surah, ayah);
+  }
+
+  public clearTaraweehLock(): void {
+    this.taraweehLock = null;
+    this.tracker.clearTaraweehLock();
+  }
+
+  private createTracker(): RecitationTracker {
+    const tracker = new RecitationTracker(this.db, this.transcribe.bind(this), {
+      onDiagnostic: this.onTrackerEvent,
+    });
+    if (this.taraweehLock) {
+      tracker.setTaraweehLock(this.taraweehLock.surah, this.taraweehLock.ayah);
+    }
+    return tracker;
   }
 
   private async transcribe(audio: Float32Array): Promise<TranscribeResult> {

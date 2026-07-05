@@ -44,7 +44,9 @@ export class QuranMatcher {
       if (index !== -1) {
         // Calculate a basic "word position" by counting spaces before the match
         const prefix = normalizedVerse.substring(0, index);
-        const wordPosition = prefix.split(/\s+/).length;
+        const wordPosition = prefix.trim()
+          ? prefix.trim().split(/\s+/).length
+          : 0;
 
         // Simplified confidence score based on exact match length ratio
         const confidenceScore = normalizedTranscript.length / normalizedVerse.length;

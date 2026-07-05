@@ -3,9 +3,12 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../core/global_logger.dart';
+import 'recitation_engine.dart';
 
-class TarteelSocketClient {
-  String _serverIp = '10.0.2.2';
+class TarteelSocketClient implements RecitationEngine {
+  @override
+  bool get supportsRemoteBackend => true;
+  String _serverIp = '127.0.0.1';
   String _serverPort = '8000';
 
   String get serverIp => _serverIp;
@@ -54,8 +57,10 @@ class TarteelSocketClient {
   Future<void> loadSettings() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      _serverIp = prefs.getString('server_ip') ?? '10.0.2.2';
+      _serverIp = prefs.getString('server_ip') ?? '127.0.0.1';
       _serverPort = prefs.getString('server_port') ?? '8000';
+      await prefs.setString('server_ip', _serverIp);
+      await prefs.setString('server_port', _serverPort);
     } catch (e) {
       // Ignore prefs error
     }
@@ -143,6 +148,17 @@ class TarteelSocketClient {
               final Map<String, dynamic> event = jsonDecode(data);
               // Ignore simple pong messages to keep logs clean
               if (event['type'] != 'pong') {
+                if (event['type'] == 'verse_match') {
+                  final newSurah = event['surah'];
+                  final newAyah = event['ayah'];
+                  if (newSurah is int &&
+                      newAyah is int &&
+                      newSurah > 0 &&
+                      newAyah > 0) {
+                    _taraweehSurah = newSurah;
+                    _taraweehAyah = newAyah;
+                  }
+                }
                 _emitEvent(event);
               }
             } catch (e) {
@@ -295,12 +311,23 @@ class TarteelSocketClient {
     }
   }
 
-  void sendAssistedPrompt(int surah, int ayah) {
+  void sendAssistedPrompt(
+    int surah,
+    int ayah, {
+    int count = 1,
+    int wordIndex = 0,
+  }) {
     _audioBuffer.clear();
     if (_socket != null && _isReady && _socket!.readyState == WebSocket.open) {
       _socket!.add(jsonEncode({"type": "discard_audio"}));
       _socket!.add(
-        jsonEncode({"type": "assisted_prompt", "surah": surah, "ayah": ayah}),
+        jsonEncode({
+          "type": "assisted_prompt",
+          "surah": surah,
+          "ayah": ayah,
+          "count": count.clamp(1, 3).toInt(),
+          "word_index": wordIndex < 0 ? 0 : wordIndex,
+        }),
       );
     }
   }

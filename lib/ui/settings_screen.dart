@@ -1,15 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import '../engine/socket_client.dart';
+import '../engine/recitation_engine.dart';
 import '../audio/audio_capture.dart';
 import '../audio/luqmah_reciters.dart';
 import 'package:record/record.dart';
 import 'dart:async';
 
 class SettingsScreen extends StatefulWidget {
-  final TarteelSocketClient engine;
+  final RecitationEngine engine;
   final AudioCaptureService audioService;
-  final VoidCallback onSaved;
+  final FutureOr<void> Function() onSaved;
 
   const SettingsScreen({
     Key? key,
@@ -48,13 +48,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String _promptAggressiveness = 'Normal';
   int _promptRepeatInterval = 3;
   int _promptMaxRepeats = 3;
+  int _promptAyahCount = 1;
   String _luqmahReciterFolder = LuqmahReciters.defaultFolder;
   bool _debugModeEnabled = false;
   bool _audioEnhancementEnabled = true;
+  bool _predictiveLuqmahEnabled = false;
   double _vadThreshold = -48.0;
 
   Future<void> _loadExtraSettings() async {
     final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
     if (!mounted) return;
     final savedVadThreshold = prefs.getDouble('vad_threshold');
     setState(() {
@@ -66,12 +69,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ? savedRepeatInterval!
           : 3;
       _promptMaxRepeats = prefs.getInt('prompt_max_repeats') ?? 3;
+      final savedPromptAyahCount = prefs.getInt('prompt_ayah_count');
+      _promptAyahCount = const [1, 2, 3].contains(savedPromptAyahCount)
+          ? savedPromptAyahCount!
+          : 1;
       _luqmahReciterFolder = LuqmahReciters.fromFolder(
         prefs.getString('luqmah_reciter_folder'),
       ).folder;
       _debugModeEnabled = prefs.getBool('debug_mode') ?? false;
       _audioEnhancementEnabled = prefs.getBool('audio_enhancement') ?? true;
-      _vadThreshold = savedVadThreshold == null || savedVadThreshold > -28
+      _predictiveLuqmahEnabled = prefs.getBool('predictive_luqmah') ?? false;
+      _vadThreshold =
+          savedVadThreshold == null ||
+              savedVadThreshold < -70.0 ||
+              savedVadThreshold > -10.0
           ? -48.0
           : savedVadThreshold;
     });
@@ -86,6 +97,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _testConnection() async {
+    if (!widget.engine.supportsRemoteBackend) {
+      setState(() => _testStatus = 'Standalone engine is active on this phone');
+      return;
+    }
     final ip = _ipController.text.trim();
     final port = _portController.text.trim();
     if (ip.isEmpty || port.isEmpty) {
@@ -112,7 +127,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _saveSettings() async {
     final ip = _ipController.text.trim();
     final port = _portController.text.trim();
-    if (ip.isEmpty || port.isEmpty) {
+    if (widget.engine.supportsRemoteBackend && (ip.isEmpty || port.isEmpty)) {
       return;
     }
 
@@ -121,22 +136,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await prefs.setString('prompt_aggressiveness', _promptAggressiveness);
     await prefs.setInt('prompt_repeat_interval', _promptRepeatInterval);
     await prefs.setInt('prompt_max_repeats', _promptMaxRepeats);
+    await prefs.setInt('prompt_ayah_count', _promptAyahCount);
     await prefs.setString('luqmah_reciter_folder', _luqmahReciterFolder);
     await prefs.setBool('debug_mode', _debugModeEnabled);
     await prefs.setBool('audio_enhancement', _audioEnhancementEnabled);
+    await prefs.setBool('predictive_luqmah', _predictiveLuqmahEnabled);
     await prefs.setDouble('vad_threshold', _vadThreshold);
     widget.audioService.enhancementEnabled = _audioEnhancementEnabled;
 
-    await widget.engine.saveSettings(ip, port);
-    widget.onSaved();
+    if (widget.engine.supportsRemoteBackend) {
+      await widget.engine.saveSettings(ip, port);
+    }
+    await widget.onSaved();
     if (!mounted) return;
     Navigator.of(context).pop();
   }
 
   @override
   Widget build(BuildContext context) {
-    final currentUrl =
-        'ws://${_ipController.text.trim()}:${_portController.text.trim()}/ws/recitation';
+    final currentUrl = widget.engine.supportsRemoteBackend
+        ? 'ws://${_ipController.text.trim()}:${_portController.text.trim()}/ws/recitation'
+        : 'Standalone on-device engine';
 
     return Scaffold(
       appBar: AppBar(title: const Text('Recitation Settings')),
@@ -145,39 +165,65 @@ class _SettingsScreenState extends State<SettingsScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Text(
-              'Configure Backend Server',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 8),
-            const Text(
-              'Enter the LAN IP and Port of your Windows host machine to connect from your physical Android phone.',
-              style: TextStyle(color: Colors.grey),
-            ),
-            const SizedBox(height: 24),
-            TextField(
-              controller: _ipController,
-              decoration: const InputDecoration(
-                labelText: 'Server IP Address',
-                hintText: 'e.g. 192.168.1.100',
-                border: OutlineInputBorder(),
+            if (widget.engine.supportsRemoteBackend) ...[
+              const Text(
+                'Configure Backend Server',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
               ),
-              keyboardType: const TextInputType.numberWithOptions(
-                decimal: true,
+              const SizedBox(height: 8),
+              const Text(
+                'Enter the LAN IP and Port of your Windows host machine to connect from your physical Android phone.',
+                style: TextStyle(color: Colors.grey),
               ),
-              onChanged: (_) => setState(() {}),
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: _portController,
-              decoration: const InputDecoration(
-                labelText: 'Server Port',
-                hintText: 'e.g. 8000',
-                border: OutlineInputBorder(),
+              const SizedBox(height: 24),
+              TextField(
+                controller: _ipController,
+                decoration: const InputDecoration(
+                  labelText: 'Server IP Address',
+                  hintText: 'e.g. 192.168.1.100',
+                  border: OutlineInputBorder(),
+                ),
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
+                onChanged: (_) => setState(() {}),
               ),
-              keyboardType: TextInputType.number,
-              onChanged: (_) => setState(() {}),
-            ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _portController,
+                decoration: const InputDecoration(
+                  labelText: 'Server Port',
+                  hintText: 'e.g. 8000',
+                  border: OutlineInputBorder(),
+                ),
+                keyboardType: TextInputType.number,
+                onChanged: (_) => setState(() {}),
+              ),
+            ] else ...[
+              const Text(
+                'Recognition Engine',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 8),
+              Card(
+                color: Colors.green.shade50,
+                child: const Padding(
+                  padding: EdgeInsets.all(12.0),
+                  child: Row(
+                    children: [
+                      Icon(Icons.phone_android, color: Colors.green),
+                      SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          'Standalone on-device recognition is active.',
+                          style: TextStyle(fontWeight: FontWeight.w600),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
             const SizedBox(height: 24),
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -308,6 +354,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
               },
             ),
             const SizedBox(height: 16),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Predictive Luqmah'),
+              subtitle: const Text(
+                'Prepare correction earlier when hesitation suggests the reciter may be getting stuck.',
+              ),
+              value: _predictiveLuqmahEnabled,
+              onChanged: (value) {
+                setState(() => _predictiveLuqmahEnabled = value);
+              },
+            ),
+            const SizedBox(height: 16),
             DropdownButtonFormField<int>(
               value: _promptRepeatInterval,
               decoration: const InputDecoration(
@@ -321,6 +379,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ],
               onChanged: (val) {
                 if (val != null) setState(() => _promptRepeatInterval = val);
+              },
+            ),
+            const SizedBox(height: 16),
+            DropdownButtonFormField<int>(
+              value: _promptAyahCount,
+              decoration: const InputDecoration(
+                labelText: 'Ayahs Per Luqmah',
+                border: OutlineInputBorder(),
+              ),
+              items: const [
+                DropdownMenuItem(value: 1, child: Text('1 Ayah (Default)')),
+                DropdownMenuItem(value: 2, child: Text('2 Ayahs')),
+                DropdownMenuItem(value: 3, child: Text('3 Ayahs')),
+              ],
+              onChanged: (val) {
+                if (val != null) setState(() => _promptAyahCount = val);
               },
             ),
             const SizedBox(height: 16),
@@ -395,24 +469,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
             const SizedBox(height: 24),
             Row(
               children: [
-                Expanded(
-                  child: ElevatedButton(
-                    onPressed: _isTesting ? null : _testConnection,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.blueGrey.shade100,
-                      foregroundColor: Colors.black87,
-                      padding: const EdgeInsets.symmetric(vertical: 14),
+                if (widget.engine.supportsRemoteBackend) ...[
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: _isTesting ? null : _testConnection,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.blueGrey.shade100,
+                        foregroundColor: Colors.black87,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                      ),
+                      child: _isTesting
+                          ? const SizedBox(
+                              height: 18,
+                              width: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Text('Test Connection'),
                     ),
-                    child: _isTesting
-                        ? const SizedBox(
-                            height: 18,
-                            width: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Text('Test Connection'),
                   ),
-                ),
-                const SizedBox(width: 16),
+                  const SizedBox(width: 16),
+                ],
                 Expanded(
                   child: ElevatedButton(
                     onPressed: _saveSettings,
