@@ -242,6 +242,7 @@ def _expected_prompt_position(
     current_ayah: int,
     progress_coverage: float,
     taraweeh_mode: bool,
+    prefer_current: bool = False,
 ) -> tuple[int, int]:
     if (
         taraweeh_mode
@@ -249,6 +250,8 @@ def _expected_prompt_position(
         and _at_surah_end(current_surah, current_ayah)
     ):
         return current_surah, last_ayah_in_surah(current_surah)
+    if prefer_current and current_surah > 0 and current_ayah > 0:
+        return current_surah, current_ayah
     return normalize_ayah_position(
         current_surah,
         current_ayah
@@ -273,12 +276,20 @@ _LONG_AYAH_WORD_THRESHOLD = 36
 _PROMPT_ADVANCE_COVERAGE = 0.92
 _PROGRESS_STALE_DELTA = 0.01
 _REWIND_TRANSITION_GRACE_SECONDS = 7.0
+_RAHMAN_REPEATED_REFRAIN_AYAHS = {
+    13, 16, 18, 21, 23, 25, 28, 30, 32, 34, 36, 38, 40, 42,
+    45, 47, 49, 51, 53, 55, 57, 59, 61, 63, 65, 67, 69, 71,
+    73, 75, 77,
+}
 
 def _word_count(text: str) -> int:
     return len([w for w in (text or "").split() if w.strip()])
 
 def _compact_char_count(text: str) -> int:
     return len((text or "").replace(" ", ""))
+
+def _is_rahman_repeated_refrain(surah: int, ayah: int) -> bool:
+    return surah == 55 and ayah in _RAHMAN_REPEATED_REFRAIN_AYAHS
 
 def _is_ambiguous_short_phrase(phoneme_text: str, verse: dict | None = None) -> bool:
     words = _word_count(phoneme_text)
@@ -500,15 +511,34 @@ def _required_forward_jump_confirmations(
             return 2
         return 0
 
-    required = 3
-    if skipped_ayahs >= 2 or forward_section_distance > 10:
-        required = 4
-    elif progress_coverage >= 0.95 and score >= 0.92:
-        required = 2
-    elif progress_coverage >= 0.90 and score >= 0.88:
-        required = 2
+    if score >= 0.92 and progress_coverage >= 0.80:
+        return 2
+    if score >= 0.86 or skipped_ayahs >= 2 or forward_section_distance > 10:
+        return 3
+    return 4
 
-    return required
+def _minimum_forward_jump_elapsed_seconds(
+    surah: int,
+    current_ayah: int,
+    matched_ayah: int,
+) -> float:
+    if surah <= 0 or matched_ayah <= current_ayah + 1:
+        return 0.0
+
+    skipped_words = 0
+    skipped_ayahs = 0
+    for ayah in range(current_ayah + 1, matched_ayah):
+        verse = get_verse(surah, ayah) or {}
+        skipped_words += max(
+            _word_count(verse.get("text_uthmani", "")),
+            _word_count(verse.get("phonemes_joined", "")),
+        )
+        skipped_ayahs += 1
+
+    # This is intentionally a lower bound, not a normal recitation estimate.
+    # If the target appears faster than this, the reciter almost certainly
+    # skipped over intervening ayahs instead of merely reciting quickly.
+    return max(1.4 * skipped_ayahs, 0.42 * skipped_words)
 
 def _phrase_boundary_for_luqmah(verse: dict, word_index: int = 0) -> dict:
     text = verse.get("text_uthmani", "")
@@ -682,56 +712,91 @@ def _same_ayah_tail_mismatch(result: dict) -> dict | None:
     surah = int(result.get("surah", 0) or 0)
     ayah = int(result.get("ayah", 0) or 0)
     progress_coverage = float(result.get("progress_coverage", 0.0) or 0.0)
+    section_index = int(result.get("section_index", 0) or 0)
+    total_sections = int(result.get("total_sections", 0) or 0)
+    match_score = float(result.get("score", 0.0) or 0.0)
 
     if not (
         surah > 0
         and ayah > 0
         and total_words >= 4
-        and word_index >= total_words
-        and progress_coverage >= 0.72
         and expected
         and got
     ):
         return None
 
+    near_tail = (
+        (word_index >= total_words and progress_coverage >= 0.70)
+        or (word_index >= max(1, total_words - 1) and progress_coverage >= 0.80)
+        or (
+            progress_coverage >= 0.90
+            and total_sections > 0
+            and section_index >= max(1, total_sections - 1)
+        )
+    )
+    if not near_tail:
+        return None
+
+    if match_score < 0.63:
+        return None
+
     if _is_ambiguous_signature_verse(surah, ayah):
         return None
 
-    expected_key = _squash(expected)
-    expected_skeleton = _phoneme_skeleton(expected)
-    if len(expected_key) < 5 or len(expected_skeleton) < 3:
-        return None
-
     transcript_words = result.get("transcript", "").strip().split()
-    candidates = [got]
+    got_candidates = [got]
+    if transcript_words:
+        got_candidates.append(transcript_words[-1])
     for tail_len in (2, 3):
         if len(transcript_words) >= tail_len:
-            candidates.append("".join(transcript_words[-tail_len:]))
+            got_candidates.append("".join(transcript_words[-tail_len:]))
+
+    verse = get_verse(surah, ayah) or {}
+    phoneme_words = [
+        w for w in (verse.get("phoneme_words") or verse.get("phonemes_joined", "").split())
+        if str(w).strip()
+    ]
+    expected_candidates = [expected]
+    for tail_len in (1, 2, 3):
+        if len(phoneme_words) >= tail_len:
+            expected_candidates.append("".join(phoneme_words[-tail_len:]))
 
     best_strict_ratio = 0.0
     best_skeleton_ratio = 0.0
-    for candidate in candidates:
-        candidate_key = _squash(candidate)
-        candidate_skeleton = _phoneme_skeleton(candidate)
-        if not candidate_key or len(candidate_key) < 4:
+    best_expected = expected
+    best_got = got
+    for expected_candidate in expected_candidates:
+        expected_key = _squash(expected_candidate)
+        expected_skeleton = _phoneme_skeleton(expected_candidate)
+        if len(expected_key) < 5 or len(expected_skeleton) < 3:
             continue
-        best_strict_ratio = max(best_strict_ratio, ratio(candidate_key, expected_key))
-        if candidate_skeleton:
-            best_skeleton_ratio = max(
-                best_skeleton_ratio,
-                ratio(candidate_skeleton, expected_skeleton),
+        for got_candidate in got_candidates:
+            candidate_key = _squash(got_candidate)
+            candidate_skeleton = _phoneme_skeleton(got_candidate)
+            if not candidate_key or len(candidate_key) < 4:
+                continue
+            strict_ratio = ratio(candidate_key, expected_key)
+            skeleton_ratio = (
+                ratio(candidate_skeleton, expected_skeleton)
+                if candidate_skeleton
+                else 0.0
             )
+            if max(strict_ratio, skeleton_ratio) > max(best_strict_ratio, best_skeleton_ratio):
+                best_expected = expected_candidate
+                best_got = got_candidate
+            best_strict_ratio = max(best_strict_ratio, strict_ratio)
+            best_skeleton_ratio = max(best_skeleton_ratio, skeleton_ratio)
 
     # Overall ayah matching can hide a bad final word because nearby words raise
     # sequence confidence. Require the consonant skeleton to disagree strongly,
     # and confirm it twice in the websocket loop before playing Luqmah.
-    if best_strict_ratio >= 0.78 or best_skeleton_ratio >= 0.70:
+    if best_strict_ratio >= 0.78 or best_skeleton_ratio >= 0.55:
         return None
 
     return {
         "word_index": word_index,
-        "expected": expected,
-        "got": got,
+        "expected": best_expected,
+        "got": best_got,
         "strict_ratio": round(best_strict_ratio, 4),
         "skeleton_ratio": round(best_skeleton_ratio, 4),
     }
@@ -1609,7 +1674,13 @@ def predict_audio(audio: np.ndarray, current_surah: int = 0, current_ayah: int =
     if not best_match:
         # --- Mistake / Restart Fallback ---
         if taraweeh_mode and current_surah > 0 and tracking_mode != "GLOBAL_SEARCH":
-            global_matches = _match_phoneme_text(phoneme_text, top_k=1, search_verses=_verses)
+            recovery_verses = _by_surah.get(current_surah, [])
+            metrics["taraweeh_recovery_scope"] = f"surah_{current_surah}_only"
+            global_matches = _match_phoneme_text(
+                phoneme_text,
+                top_k=1,
+                search_verses=recovery_verses,
+            ) if recovery_verses else []
             if global_matches and global_matches[0]["score"] > 0.75:
                 gm = global_matches[0]
                 gm_verse = get_verse(gm["surah"], gm["ayah"]) or {}
@@ -1623,7 +1694,18 @@ def predict_audio(audio: np.ndarray, current_surah: int = 0, current_ayah: int =
                 at_taraweeh_surah_end = current_ayah >= last_current_ayah
 
                 # Ignore weak global matches on short audio segments (Tajweed noise)
-                if duration_sec < 3.0 and gm["score"] < 0.82:
+                if gm["surah"] != current_surah:
+                    # Defensive guard: Taraweeh recovery must never create a
+                    # cross-surah Luqmah. The search is already scoped above,
+                    # but keep this if future matcher changes widen spans.
+                    metrics["taraweeh_cross_surah_suppressed"] = True
+                    print(
+                        "[Backend] Suppressed cross-surah Taraweeh recovery "
+                        f"{gm['surah']}:{gm['ayah']} while locked to "
+                        f"{current_surah}:{current_ayah}"
+                    )
+                    pass
+                elif duration_sec < 3.0 and gm["score"] < 0.82:
                     pass
                 elif at_taraweeh_surah_end and gm["surah"] != current_surah:
                     pass
@@ -1634,9 +1716,13 @@ def predict_audio(audio: np.ndarray, current_surah: int = 0, current_ayah: int =
                     pass
                 else:
                     ayah_delta = gm["ayah"] - current_ayah if gm["surah"] == current_surah else 99
-                    if gm["surah"] == current_surah and -16 <= ayah_delta <= 3:
+                    if gm["surah"] == current_surah:
                         best_match = gm
-                        tracking_mode = "GLOBAL_RECOVERY"
+                        tracking_mode = (
+                            "GLOBAL_RECOVERY"
+                            if -16 <= ayah_delta <= 3
+                            else "SURAH_FORWARD_RECOVERY"
+                        )
                         window_str = f"Recovered in Surah {current_surah}"
                     elif gm["score"] >= 0.84:
                         print(f"[Backend] Immediate mistake near {current_surah}:{current_ayah}; globally matched {gm['surah']}:{gm['ayah']} (Conf: {gm['score']:.2f})")
@@ -1664,6 +1750,44 @@ def predict_audio(audio: np.ndarray, current_surah: int = 0, current_ayah: int =
                         "mistake_score": gm["score"]
                     }
         # ----------------------------------
+        if taraweeh_mode and current_surah > 0 and not _at_surah_end(current_surah, current_ayah):
+            transcript_chars = _compact_char_count(phoneme_text)
+            if transcript_chars >= 28:
+                foreign_matches = _match_phoneme_text(
+                    phoneme_text,
+                    top_k=1,
+                    search_verses=_verses,
+                )
+                if foreign_matches and foreign_matches[0]["score"] >= 0.90:
+                    fm = foreign_matches[0]
+                    fm_verse = get_verse(fm["surah"], fm["ayah"]) or {}
+                    if (
+                        fm["surah"] != current_surah
+                        and not _is_ambiguous_short_phrase(phoneme_text, fm_verse)
+                    ):
+                        print(
+                            "[Backend] Foreign recitation while locked to "
+                            f"{current_surah}:{current_ayah}; heard "
+                            f"{fm['surah']}:{fm['ayah']} "
+                            f"(Conf: {fm['score']:.2f})"
+                        )
+                        return {
+                            "surah": 0,
+                            "ayah": 0,
+                            "score": 0.0,
+                            "transcript": phoneme_text,
+                            "error": "Mistake detected",
+                            "speech_detected": True,
+                            "tracking_mode": "TARAWEEH_FOREIGN_RECITATION",
+                            "search_window": f"Surah {current_surah} only",
+                            "metrics": metrics,
+                            "mistake_candidate": True,
+                            "mistake_surah": fm["surah"],
+                            "mistake_ayah": fm["ayah"],
+                            "mistake_score": fm["score"],
+                            "mistake_immediate": fm["score"] >= 0.92,
+                            "mistake_reason": "foreign_recitation",
+                        }
     if not best_match:
         return {"surah": 0, "ayah": 0, "score": 0.0, "transcript": phoneme_text, "error": "Keep reciting", "speech_detected": True, "tracking_mode": tracking_mode, "search_window": window_str, "metrics": metrics}
 
@@ -1998,7 +2122,46 @@ async def websocket_recitation(websocket: WebSocket):
                                 })
                                 continue
 
-                            if rewind_distance >= 2 and assisted_ayah == 0:
+                            if (
+                                current_surah == 55
+                                and matched_surah == 55
+                                and (
+                                    _is_rahman_repeated_refrain(matched_surah, matched_ayah)
+                                    or _is_rahman_repeated_refrain(current_surah, current_ayah)
+                                )
+                            ):
+                                pending_rewind_ayah = 0
+                                pending_rewind_count = 0
+                                pending_loop_key = None
+                                pending_loop_count = 0
+                                await websocket.send_json({
+                                    "type": "status",
+                                    "message": f"Repeated Rahman refrain overlap; holding Ayah {current_ayah}.",
+                                    "tracking_mode": "RAHMAN_REFRAIN_REWIND_HOLD",
+                                    "search_window": result.get("search_window", ""),
+                                    "fallback_count": failed_local_matches,
+                                    "metrics": result.get("metrics", {})
+                                })
+                                continue
+
+                            recent_tracker_relock = (
+                                rewind_distance >= 2
+                                and last_ayah_change_time > 0
+                                and time.time() - last_ayah_change_time < _REWIND_TRANSITION_GRACE_SECONDS
+                                and result.get("score", 0.0) >= 0.80
+                            )
+                            if recent_tracker_relock:
+                                pending_rewind_ayah = 0
+                                pending_rewind_count = 0
+                                pending_loop_key = None
+                                pending_loop_count = 0
+                                print(
+                                    "[Backend] Recent tracker relock accepted from "
+                                    f"{current_surah}:{current_ayah} back to "
+                                    f"{matched_surah}:{matched_ayah}; treating as "
+                                    "state recovery, not repetition."
+                                )
+                            elif rewind_distance >= 2 and assisted_ayah == 0:
                                 loop_key = (matched_surah, matched_ayah)
                                 if pending_loop_key == loop_key:
                                     pending_loop_count += 1
@@ -2006,27 +2169,7 @@ async def websocket_recitation(websocket: WebSocket):
                                     pending_loop_key = loop_key
                                     pending_loop_count = 1
 
-                                expected_surah, expected_ayah = _expected_prompt_position(
-                                    current_surah,
-                                    current_ayah,
-                                    current_progress_coverage,
-                                    taraweeh_mode,
-                                )
-                                if pending_loop_count >= 2 and time.time() >= mistake_cooldown_until:
-                                    await websocket.send_json({
-                                        "type": "mistake_detected",
-                                        "expected_surah": expected_surah,
-                                        "expected_ayah": expected_ayah,
-                                        "detected_surah": matched_surah,
-                                        "detected_ayah": matched_ayah,
-                                        "score": result.get("score", 0.0),
-                                        "reason": "repetition_loop",
-                                    })
-                                    mistake_cooldown_until = time.time() + 3.0
-                                    pending_loop_key = None
-                                    pending_loop_count = 0
-                                    audio_buffer = np.zeros(0, dtype=np.float32)
-                                else:
+                                if pending_loop_count < 2:
                                     await websocket.send_json({
                                         "type": "status",
                                         "message": f"Possible repeated earlier ayah {matched_ayah}; holding current position.",
@@ -2035,33 +2178,42 @@ async def websocket_recitation(websocket: WebSocket):
                                         "fallback_count": failed_local_matches,
                                         "metrics": result.get("metrics", {}),
                                     })
-                                continue
+                                    continue
+                                print(
+                                    "[Backend] Confirmed reciter repeat/rewind from "
+                                    f"{current_surah}:{current_ayah} to "
+                                    f"{matched_surah}:{matched_ayah}; following reciter "
+                                    "without Luqmah."
+                                )
+                                pending_loop_key = None
+                                pending_loop_count = 0
 
-                            if pending_rewind_ayah == matched_ayah:
-                                pending_rewind_count += 1
-                            else:
-                                pending_rewind_ayah = matched_ayah
-                                pending_rewind_count = 1
-                                
-                            required_rewind_confirmations = 3 if rewind_distance == 1 else 2
-                            if pending_rewind_count < required_rewind_confirmations:
-                                # Not confirmed yet
-                                await websocket.send_json({
-                                    "type": "status",
-                                    "message": (
-                                        f"Rewind detected to Ayah {matched_ayah}. "
-                                        f"Confirming {pending_rewind_count}/{required_rewind_confirmations}..."
-                                    ),
-                                    "tracking_mode": "REWIND DETECTED (Confirming...)",
-                                    "search_window": result.get("search_window", ""),
-                                    "fallback_count": failed_local_matches,
-                                    "metrics": result.get("metrics", {})
-                                })
-                                continue # Skip applying the match
-                            else:
-                                print(f"[Backend] Confirmed Rewind to Ayah {matched_ayah}")
-                                pending_rewind_count = 0
-                                pending_rewind_ayah = 0
+                            if not recent_tracker_relock:
+                                if pending_rewind_ayah == matched_ayah:
+                                    pending_rewind_count += 1
+                                else:
+                                    pending_rewind_ayah = matched_ayah
+                                    pending_rewind_count = 1
+
+                                required_rewind_confirmations = 3 if rewind_distance == 1 else 2
+                                if pending_rewind_count < required_rewind_confirmations:
+                                    # Not confirmed yet
+                                    await websocket.send_json({
+                                        "type": "status",
+                                        "message": (
+                                            f"Rewind detected to Ayah {matched_ayah}. "
+                                            f"Confirming {pending_rewind_count}/{required_rewind_confirmations}..."
+                                        ),
+                                        "tracking_mode": "REWIND DETECTED (Confirming...)",
+                                        "search_window": result.get("search_window", ""),
+                                        "fallback_count": failed_local_matches,
+                                        "metrics": result.get("metrics", {})
+                                    })
+                                    continue # Skip applying the match
+                                else:
+                                    print(f"[Backend] Confirmed Rewind to Ayah {matched_ayah}")
+                                    pending_rewind_count = 0
+                                    pending_rewind_ayah = 0
                         else:
                             pending_rewind_count = 0
                             pending_rewind_ayah = 0
@@ -2082,6 +2234,34 @@ async def websocket_recitation(websocket: WebSocket):
                             current_progress_coverage,
                             result.get("score", 0.0),
                         )
+                        ambiguous_rahman_refrain_jump = (
+                            taraweeh_mode
+                            and assisted_ayah == 0
+                            and current_surah == 55
+                            and matched_surah == 55
+                            and matched_ayah > current_ayah
+                            and _is_rahman_repeated_refrain(matched_surah, matched_ayah)
+                            and (
+                                matched_ayah > current_ayah + 1
+                                or _is_rahman_repeated_refrain(current_surah, current_ayah)
+                            )
+                        )
+                        if ambiguous_rahman_refrain_jump:
+                            pending_forward_surah = 0
+                            pending_forward_ayah = 0
+                            pending_forward_count = 0
+                            await websocket.send_json({
+                                "type": "status",
+                                "message": (
+                                    f"Ambiguous Rahman refrain matched Ayah {matched_ayah}; "
+                                    f"holding Ayah {current_ayah} until nearby context confirms."
+                                ),
+                                "tracking_mode": "RAHMAN_REFRAIN_HOLD",
+                                "search_window": result.get("search_window", ""),
+                                "fallback_count": failed_local_matches,
+                                "metrics": result.get("metrics", {}),
+                            })
+                            continue
 
                         if (
                             taraweeh_mode
@@ -2117,6 +2297,61 @@ async def websocket_recitation(websocket: WebSocket):
                                     "metrics": result.get("metrics", {})
                                 })
                                 continue
+                            if skipped_ayahs > 0:
+                                elapsed_since_ayah_change = (
+                                    time.time() - last_ayah_change_time
+                                    if last_ayah_change_time > 0
+                                    else 999.0
+                                )
+                                min_forward_elapsed = _minimum_forward_jump_elapsed_seconds(
+                                    current_surah,
+                                    current_ayah,
+                                    matched_ayah,
+                                )
+                                expected_surah, expected_ayah = _expected_prompt_position(
+                                    current_surah,
+                                    current_ayah,
+                                    current_progress_coverage,
+                                    taraweeh_mode,
+                                )
+                                if skipped_ayahs > 8:
+                                    print(
+                                        "[Backend] Large forward relock accepted from "
+                                        f"{current_surah}:{current_ayah} to "
+                                        f"{matched_surah}:{matched_ayah}; treating as "
+                                        "tracking recovery, not Luqmah."
+                                    )
+                                elif elapsed_since_ayah_change < min_forward_elapsed:
+                                    print(
+                                        "[Backend] Confirmed fast forward jump from "
+                                        f"{current_surah}:{current_ayah} to "
+                                        f"{matched_surah}:{matched_ayah}; prompting "
+                                        f"{expected_surah}:{expected_ayah} "
+                                        f"(elapsed={elapsed_since_ayah_change:.1f}s, "
+                                        f"min={min_forward_elapsed:.1f}s)"
+                                    )
+                                    await websocket.send_json({
+                                        "type": "mistake_detected",
+                                        "expected_surah": expected_surah,
+                                        "expected_ayah": expected_ayah,
+                                        "detected_surah": matched_surah,
+                                        "detected_ayah": matched_ayah,
+                                        "score": result.get("score", 0.0),
+                                        "reason": "forward_jump",
+                                    })
+                                    pending_forward_surah = 0
+                                    pending_forward_ayah = 0
+                                    pending_forward_count = 0
+                                    mistake_cooldown_until = time.time() + 3.0
+                                    audio_buffer = np.zeros(0, dtype=np.float32)
+                                    continue
+                                print(
+                                    "[Backend] Forward recovery accepted from "
+                                    f"{current_surah}:{current_ayah} to "
+                                    f"{matched_surah}:{matched_ayah} "
+                                    f"(elapsed={elapsed_since_ayah_change:.1f}s, "
+                                    f"min={min_forward_elapsed:.1f}s)"
+                                )
                             pending_forward_surah = 0
                             pending_forward_ayah = 0
                             pending_forward_count = 0
@@ -2335,11 +2570,29 @@ async def websocket_recitation(websocket: WebSocket):
                         pending_tail_mismatch_key = None
                         pending_tail_mismatch_count = 0
                         if result.get("mistake_candidate"):
+                            mistake_reason = result.get("mistake_reason", "")
+                            prefer_current_correction = (
+                                mistake_reason == "foreign_recitation"
+                                and (
+                                    current_progress_coverage < 0.98
+                                    or _is_rahman_repeated_refrain(current_surah, current_ayah)
+                                    or (
+                                        last_ayah_change_time > 0
+                                        and time.time() - last_ayah_change_time
+                                        < _transition_grace_seconds(
+                                            current_surah,
+                                            current_ayah,
+                                            current_progress_coverage,
+                                        )
+                                    )
+                                )
+                            )
                             expected_surah, expected_ayah = _expected_prompt_position(
                                 current_surah,
                                 current_ayah,
                                 current_progress_coverage,
                                 taraweeh_mode,
+                                prefer_current=prefer_current_correction,
                             )
                             transcript_text = result.get("transcript", "")
                             transcript_chars = _compact_char_count(transcript_text)
@@ -2371,14 +2624,35 @@ async def websocket_recitation(websocket: WebSocket):
                                     "metrics": result.get("metrics", {}),
                                 })
                                 continue
-                            mistake_key = (
-                                expected_surah,
-                                expected_ayah,
-                                result["mistake_surah"],
-                                result["mistake_ayah"],
-                            )
+                            if (
+                                mistake_reason == "foreign_recitation"
+                                and result["mistake_surah"] > 0
+                                and result["mistake_surah"] != current_surah
+                            ):
+                                mistake_key = (expected_surah, expected_ayah, "foreign_recitation")
+                            else:
+                                mistake_key = (
+                                    expected_surah,
+                                    expected_ayah,
+                                    result["mistake_surah"],
+                                    result["mistake_ayah"],
+                                )
                             if time.time() >= mistake_cooldown_until and assisted_ayah == 0:
-                                required_confirmations = 1 if result.get("mistake_immediate") else 2
+                                foreign_recitation_candidate = (
+                                    mistake_reason == "foreign_recitation"
+                                    and result["mistake_surah"] > 0
+                                    and result["mistake_surah"] != current_surah
+                                )
+                                foreign_immediate_allowed = (
+                                    not foreign_recitation_candidate
+                                    or current_progress_coverage >= 0.65
+                                    or result.get("mistake_score", 0.0) >= 0.97
+                                )
+                                required_confirmations = (
+                                    1
+                                    if result.get("mistake_immediate") and foreign_immediate_allowed
+                                    else 2
+                                )
                                 expected_is_ambiguous = _is_ambiguous_signature_verse(
                                     expected_surah,
                                     expected_ayah,
@@ -2394,11 +2668,17 @@ async def websocket_recitation(websocket: WebSocket):
                                 strong_immediate_mistake = (
                                     bool(result.get("mistake_immediate"))
                                     and result.get("mistake_score", 0.0) >= 0.84
+                                    and foreign_immediate_allowed
                                     and transcript_chars >= 20
                                     and not expected_is_ambiguous
                                     and not detected_is_ambiguous
                                 )
-                                if expected_is_ambiguous or detected_is_ambiguous:
+                                if (
+                                    expected_is_ambiguous or detected_is_ambiguous
+                                ) and not (
+                                    mistake_reason == "foreign_recitation"
+                                    and strong_immediate_mistake
+                                ):
                                     # Repeated openings like "حم" or "الم" are
                                     # globally ambiguous, so never interrupt
                                     # Taraweeh from a single stray hit.
@@ -2432,6 +2712,7 @@ async def websocket_recitation(websocket: WebSocket):
                                         "detected_surah": result["mistake_surah"],
                                         "detected_ayah": result["mistake_ayah"],
                                         "score": result.get("mistake_score", 0.0),
+                                        "reason": mistake_reason or "mistake_candidate",
                                     })
                                     pending_mistake_key = None
                                     pending_mistake_count = 0

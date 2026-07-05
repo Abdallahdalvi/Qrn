@@ -216,6 +216,58 @@
   - `backend-live-after-rahman-fix-20260705-014818.out.log`
   - marker bytes at start: `0`
 
+## Checkpoint B local audio regression - July 6, 2026
+
+### Test corpus
+
+- `C:\Users\devev\Downloads\Test Quran\Surah Rahman Correct Recitation.mp3`
+- `C:\Users\devev\Downloads\Test Quran\Surah Qiyamah Correct Recitation.mp3`
+- `C:\Users\devev\Downloads\Test Quran\Surah Rahman Wrong Recitation.wav`
+- `C:\Users\devev\Downloads\Test Quran\Surah Qiyamah Wrong Recitation.wav`
+
+### Current production path
+
+- Provider: `CPUExecutionProvider`
+- Decoder: `context_beam`
+- Stateful Taraweeh replay: `4/4 passed`
+- Correct recitations:
+  - Rahman correct: final `55:78`, `0` corrections, avg latency `0.231s`
+  - Qiyamah correct: final `75:40`, `0` corrections, avg latency `0.226s`
+- Wrong recitations:
+  - Rahman wrong: `3` corrections, including `55:24` tail mismatch (`fiaaalbaHrikaal<aElaami` expected vs `fiaaaljinniwal<insi` heard)
+  - Qiyamah wrong: `1` foreign-recitation correction near expected `75:17`
+
+### CUDA finding
+
+- CUDA was tested on the same local files but is not recommended for checkpoint B.
+- On this Q8 ONNX model it was slower and less stable than CPU.
+- ONNX Runtime also reports hundreds of graph memcpy nodes for CUDA, which likely explains the poor GTX-class performance.
+
+### External model spike
+
+- `TheGreatQuran2026/fastconformer-quran-ar` ONNX downloaded to `tmp-models` for local-only evaluation.
+- Model metadata from Hugging Face:
+  - FastConformer Hybrid Large, `114.6M` parameters
+  - Arabic BPE/CTC-style output, `1025` output classes
+  - `88.4 MB` quantized ONNX
+  - reported WER `0.14%` on `tarteel-ai/everyayah`, unverified
+- Local Arabic-text verse tracking adapter: `tool/asr_text_model_regression.py`
+- Same corpus verse-level result: `4/4 passed`
+  - Rahman correct: final `55:78`, avg latency `0.419s`
+  - Qiyamah correct: final `75:40`, avg latency `0.411s`
+  - Rahman wrong: final `55:21`, avg latency `0.407s`
+  - Qiyamah wrong: final `75:18`, avg latency `0.410s`
+- Interpretation:
+  - promising for future Arabic-text verse tracking
+  - slower than current CPU phoneme model in this harness
+  - does not yet replace phoneme-level Luqmah/tail mismatch detection
+
+### Policy correction
+
+- Repetition/backward recitation is valid in Taraweeh.
+- Confirmed rewind/repetition is now treated as reciter tracking, not `mistake_detected`.
+- Luqmah should come from wrong-word/tail mismatch, foreign-surah recitation, impossible fast forward jumps, or no-progress/stuck behavior, not from a Hafiz repeating earlier ayahs.
+
 ### Live observations
 
 - Wrong other-surah recitation at `55:16` worked:
@@ -330,6 +382,28 @@
   - `versionName=1.1.3`
   - `versionCode=5`
   - `lastUpdateTime=2026-07-05 02:08:07`
+
+## Run: Rahman YouTube false Luqmah retest - July 5, 2026
+
+### Observation
+
+- Device: `DQHYWWMBPF4TNF4H`
+- Backend: `backend-adb-test-20260705-233529.out.log`
+- ADB logcat: `adb-live-app-20260705-233730.log`
+- Setup: Taraweeh mode locked to Surah Rahman `55:1`, app auto-recording from Taraweeh start.
+- Tracking initially progressed correctly through Rahman into the teens.
+- False Luqmah fired around `55:17`.
+- Backend root cause:
+  - local Taraweeh matching rejected non-local candidates correctly
+  - the later restart fallback still searched the full `_verses` Quran corpus
+  - it globally matched the audio to `53:57` with score about `0.79`
+  - WebSocket confirmation then sent `mistake_detected`, causing Luqmah while the run was supposed to be Surah-locked
+
+### Fix applied
+
+- Taraweeh restart recovery now searches only `_by_surah[current_surah]`.
+- Added a defensive suppression metric/log if a future matcher change ever produces a cross-surah Taraweeh recovery candidate.
+- This preserves same-surah recovery/jump detection while enforcing the rule that Taraweeh mode must not compare against other surahs.
 
 ## Run: Rahman manual fault test - July 5, 2026
 

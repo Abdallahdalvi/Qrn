@@ -46,6 +46,8 @@ app.*.map.json
 node_modules/
 .venv/
 tmp/
+tmp-*
+tmp-models/
 
 *.onnx
 !assets/web/*.onnx

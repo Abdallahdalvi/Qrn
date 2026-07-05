@@ -130,6 +130,8 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen>
   double _promptPlaybackLastRms = -100.0;
   DateTime? _promptSpeechCandidateSince;
   String _luqmahReciterFolder = LuqmahReciters.defaultFolder;
+  String _promptPinnedReciterFolder = '';
+  String _promptPinnedReciterKey = '';
   DateTime _lastMistakeCorrectionAt = DateTime.fromMillisecondsSinceEpoch(0);
   String _lastMistakeCorrectionKey = '';
   DateTime _lastWordCorrectionAt = DateTime.fromMillisecondsSinceEpoch(0);
@@ -777,6 +779,8 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen>
       _promptAudioAyah = 0;
       _promptAudioVerses = [];
       _promptAyahText = '';
+      _promptPinnedReciterFolder = '';
+      _promptPinnedReciterKey = '';
       widget.engine.clearAssistedPrompt();
     }
     if (_promptState == PromptState.PLAYING_AUDIO ||
@@ -881,11 +885,17 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen>
         .map((verse) => '${verse['surah']}:${verse['ayah']}')
         .join(', ');
     _addLog('[PROMPT] Luqmah queued: $labels');
-    final reciterFolders = <String>{
-      _luqmahReciterFolder,
-      LuqmahReciters.defaultFolder,
-      'Abdul_Basit_Murattal_192kbps',
-    };
+    if (_promptPinnedReciterKey != labels) {
+      _promptPinnedReciterKey = labels;
+      _promptPinnedReciterFolder = '';
+    }
+    final reciterFolders = _promptPinnedReciterFolder.isNotEmpty
+        ? <String>[_promptPinnedReciterFolder]
+        : <String>{
+            _luqmahReciterFolder,
+            LuqmahReciters.defaultFolder,
+            'Abdul_Basit_Murattal_192kbps',
+          }.toList();
     for (final reciter in reciterFolders) {
       try {
         await _audioPlayer.stop();
@@ -901,6 +911,8 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen>
         _promptPlaybackLeakFloor = -100.0;
         _promptPlaybackLastRms = -100.0;
         _promptSpeechCandidateSince = null;
+        _promptPinnedReciterKey = labels;
+        _promptPinnedReciterFolder = reciter;
         _addLog(
           '[PROMPT] Luqmah playback started with $reciter '
           '(${verses.length} ayah)',
@@ -939,6 +951,19 @@ class _LiveRecitationScreenState extends State<LiveRecitationScreen>
       _trackingMode = event['tracking_mode'] ?? _trackingMode;
       _searchWindow = event['search_window'] ?? _searchWindow;
       _fallbackCount = event['fallback_count'] ?? _fallbackCount;
+      final reason = event['reason']?.toString() ?? '';
+      final expectedSurah = event['expected_surah'] is num
+          ? (event['expected_surah'] as num).toInt()
+          : 0;
+      final expectedAyah = event['expected_ayah'] is num
+          ? (event['expected_ayah'] as num).toInt()
+          : 0;
+      if (_taraweehModeEnabled &&
+          reason == 'no_context_progress' &&
+          expectedSurah == _currentSurah &&
+          expectedAyah > 0) {
+        _needsCurrentAyahCorrection = expectedAyah == _currentAyah;
+      }
       _addLog(msg);
       if (msg.contains('Connecting')) {
         _connectionStatus = 'Connecting...';
