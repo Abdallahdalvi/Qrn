@@ -25,4 +25,39 @@ A highly advanced AI-powered Quran recitation assistant that automatically track
 - **Assisted Recovery:** Repeats the next Ayah's audio up to 3 times if you're stuck, and immediately locks its tracking to ensure it follows you.
 - **Mutashabihat Protection:** Safely locks tracking so the engine won't randomly jump to a similar-sounding Ayah in a different Surah.
 
+## Developer Backend Setup
+
+The backend requires `assets/web/fastconformer_phoneme_q8.onnx`. This model is intentionally ignored by Git because it is larger than GitHub's normal file limit. For a fresh computer, copy that file into `assets/web/`, or set up Git LFS/release download before running the backend.
+
+CPU backend:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\pip.exe install -r requirements-backend.txt
+.\.venv\Scripts\python.exe -m uvicorn backend:app --host 0.0.0.0 --port 8000
+```
+
+CUDA backend, if the machine has a compatible NVIDIA/CUDA/cuDNN setup:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\pip.exe install -r requirements-backend-gpu.txt
+$env:QURAN_ASR_PROVIDER = "cuda"
+.\.venv\Scripts\python.exe -m uvicorn backend:app --host 0.0.0.0 --port 8000
+```
+
+Decoder options:
+
+```powershell
+$env:QURAN_ASR_DECODER = "greedy"  # default, safest
+$env:QURAN_ASR_DECODER = "beam"    # opt-in CTC prefix beam fallback
+```
+
+Regression replay:
+
+```powershell
+.\.venv\Scripts\python.exe tool\asr_regression.py --manifest tool\asr_regression_manifest.example.json --decoder greedy --out tmp\asr_greedy.json
+.\.venv\Scripts\python.exe tool\asr_regression.py --manifest tool\asr_regression_manifest.example.json --decoder beam --out tmp\asr_beam.json
+```
+
 Enjoy your recitation with your new AI teacher!

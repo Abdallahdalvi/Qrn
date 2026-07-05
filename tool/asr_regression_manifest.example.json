@@ -1,0 +1,26 @@
+{
+  "cases": [
+    {
+      "name": "rahman_youtube_correct_1_25",
+      "audio": "regression_audio/rahman_youtube_1_25.wav",
+      "start_surah": 55,
+      "start_ayah": 1,
+      "taraweeh": true,
+      "expect_no_mistake": true,
+      "expected_final_surah": 55,
+      "expected_final_ayah_min": 20,
+      "expected_final_ayah_max": 27
+    },
+    {
+      "name": "rahman_manual_tail_mistake_24",
+      "audio": "regression_audio/rahman_manual_tail_mistake_24.wav",
+      "start_surah": 55,
+      "start_ayah": 1,
+      "taraweeh": true,
+      "expect_no_mistake": false,
+      "expected_final_surah": 55,
+      "expected_final_ayah_min": 20,
+      "expected_final_ayah_max": 27
+    }
+  ]
+}

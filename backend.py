@@ -24,11 +24,26 @@ app.add_middleware(
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok"}
+    providers = []
+    if _onnx_session is not None:
+        providers = list(_onnx_session.get_providers())
+    return {
+        "status": "ok",
+        "onnx_providers": providers,
+        "decoder": ASR_DECODER,
+    }
 
 # Paths
 ONNX_MODEL_PATH = Path("assets/web/fastconformer_phoneme_q8.onnx")
 QURAN_PHONEMES_PATH = Path("assets/web/quran_phonemes.json")
+
+# Runtime knobs. Defaults are intentionally conservative: CUDA is used when the
+# installed ONNX Runtime exposes it, while the decoder remains greedy until we
+# have regression data proving beam search helps Luqmah rather than masking it.
+ASR_PROVIDER = os.environ.get("QURAN_ASR_PROVIDER", "auto").strip().lower()
+ASR_DECODER = os.environ.get("QURAN_ASR_DECODER", "greedy").strip().lower()
+ASR_BEAM_WIDTH = max(1, int(os.environ.get("QURAN_ASR_BEAM_WIDTH", "8")))
+ASR_BEAM_TOP_TOKENS = max(2, int(os.environ.get("QURAN_ASR_BEAM_TOP_TOKENS", "10")))
 
 # Vocab Definition
 PHONEME_VOCAB = [
@@ -59,6 +74,55 @@ _onnx_session = None
 _verses = []
 _by_surah = {}
 
+def _make_session_options() -> ort.SessionOptions:
+    options = ort.SessionOptions()
+    options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
+    intra_threads = int(os.environ.get("QURAN_ASR_INTRA_THREADS", "0") or "0")
+    inter_threads = int(os.environ.get("QURAN_ASR_INTER_THREADS", "0") or "0")
+    if intra_threads > 0:
+        options.intra_op_num_threads = intra_threads
+    if inter_threads > 0:
+        options.inter_op_num_threads = inter_threads
+
+    return options
+
+def _select_onnx_providers() -> list:
+    available = ort.get_available_providers()
+    requested = ASR_PROVIDER
+
+    if requested in {"cpu", "cpuexecutionprovider"}:
+        print("[Backend] ONNX provider forced to CPUExecutionProvider.")
+        return ["CPUExecutionProvider"]
+
+    if requested not in {"auto", "cuda", "cudaexecutionprovider"}:
+        print(f"[Backend] Unknown QURAN_ASR_PROVIDER={requested!r}; using auto.")
+        requested = "auto"
+
+    cuda_available = "CUDAExecutionProvider" in available
+    if requested in {"cuda", "cudaexecutionprovider"} and not cuda_available:
+        print(
+            "[Backend] QURAN_ASR_PROVIDER=cuda requested, but this Python "
+            f"environment only exposes providers: {available}. Falling back to CPU."
+        )
+        return ["CPUExecutionProvider"]
+
+    if cuda_available and requested in {"auto", "cuda", "cudaexecutionprovider"}:
+        cuda_options = {
+            "device_id": int(os.environ.get("QURAN_ASR_CUDA_DEVICE_ID", "0") or "0"),
+            "arena_extend_strategy": "kNextPowerOfTwo",
+            "cudnn_conv_algo_search": os.environ.get(
+                "QURAN_ASR_CUDNN_CONV_ALGO_SEARCH",
+                "HEURISTIC",
+            ),
+            "do_copy_in_default_stream": 1,
+        }
+        print("[Backend] ONNX provider order: CUDAExecutionProvider -> CPUExecutionProvider")
+        return [("CUDAExecutionProvider", cuda_options), "CPUExecutionProvider"]
+
+    print(f"[Backend] CUDAExecutionProvider unavailable; providers exposed: {available}.")
+    return ["CPUExecutionProvider"]
+
 def load_recognition_engine():
     global _onnx_session, _verses, _by_surah
     if _onnx_session is not None:
@@ -70,8 +134,10 @@ def load_recognition_engine():
     
     _onnx_session = ort.InferenceSession(
         str(ONNX_MODEL_PATH),
-        providers=["CPUExecutionProvider"],
+        sess_options=_make_session_options(),
+        providers=_select_onnx_providers(),
     )
+    print(f"[Backend] Active ONNX providers: {_onnx_session.get_providers()}")
 
     print(f"[Backend] Loading Quran phonemes from {QURAN_PHONEMES_PATH}...")
     if not QURAN_PHONEMES_PATH.exists():
@@ -808,6 +874,141 @@ def _greedy_decode_phonemes(logprobs: np.ndarray) -> str:
         words.append("".join(cur))
     return " ".join(words)
 
+def _phoneme_tokens_to_text(token_ids: tuple[int, ...] | list[int]) -> str:
+    words = []
+    cur = []
+    for idx in token_ids:
+        if idx < 0 or idx >= len(PHONEME_VOCAB):
+            continue
+        token = PHONEME_VOCAB[idx]
+        if token == "|":
+            if cur:
+                words.append("".join(cur))
+            cur = []
+        else:
+            cur.append(token)
+    if cur:
+        words.append("".join(cur))
+    return " ".join(words)
+
+def _log_add_exp(a: float, b: float) -> float:
+    if a == -math.inf:
+        return b
+    if b == -math.inf:
+        return a
+    hi = max(a, b)
+    return hi + math.log1p(math.exp(min(a, b) - hi))
+
+def _ctc_prefix_beam_decode(logprobs: np.ndarray, beam_width: int, top_tokens: int) -> list[dict]:
+    """Return CTC prefix-beam candidates without a Quran LM/trie.
+
+    This is deliberately opt-in. It can recover non-greedy phoneme choices, but
+    unconstrained beams may also smooth over real recitation mistakes, so the
+    regression harness should decide whether/where we enable it.
+    """
+    if logprobs.ndim != 2 or logprobs.shape[0] == 0:
+        return []
+
+    vocab_size = logprobs.shape[1]
+    top_tokens = min(max(2, top_tokens), vocab_size)
+    beam_width = max(1, beam_width)
+
+    beams: dict[tuple[int, ...], tuple[float, float]] = {(): (0.0, -math.inf)}
+    for frame in logprobs:
+        next_beams: dict[tuple[int, ...], tuple[float, float]] = {}
+        top_ids = np.argpartition(frame, -top_tokens)[-top_tokens:]
+        if BLANK_ID < vocab_size and BLANK_ID not in top_ids:
+            top_ids = np.append(top_ids, BLANK_ID)
+
+        for prefix, (p_blank, p_nonblank) in beams.items():
+            p_total = _log_add_exp(p_blank, p_nonblank)
+
+            for token_id_raw in top_ids:
+                token_id = int(token_id_raw)
+                token_prob = float(frame[token_id])
+
+                if token_id == BLANK_ID:
+                    next_blank, next_nonblank = next_beams.get(prefix, (-math.inf, -math.inf))
+                    next_beams[prefix] = (
+                        _log_add_exp(next_blank, p_total + token_prob),
+                        next_nonblank,
+                    )
+                    continue
+
+                last_token = prefix[-1] if prefix else None
+                if token_id == last_token:
+                    # CTC can either keep the collapsed prefix or create an
+                    # explicit repeated label if a blank separated the repeat.
+                    next_blank, next_nonblank = next_beams.get(prefix, (-math.inf, -math.inf))
+                    next_beams[prefix] = (
+                        next_blank,
+                        _log_add_exp(next_nonblank, p_nonblank + token_prob),
+                    )
+
+                    extended = prefix + (token_id,)
+                    ext_blank, ext_nonblank = next_beams.get(extended, (-math.inf, -math.inf))
+                    next_beams[extended] = (
+                        ext_blank,
+                        _log_add_exp(ext_nonblank, p_blank + token_prob),
+                    )
+                else:
+                    extended = prefix + (token_id,)
+                    ext_blank, ext_nonblank = next_beams.get(extended, (-math.inf, -math.inf))
+                    next_beams[extended] = (
+                        ext_blank,
+                        _log_add_exp(ext_nonblank, p_total + token_prob),
+                    )
+
+        beams = dict(
+            sorted(
+                next_beams.items(),
+                key=lambda item: _log_add_exp(item[1][0], item[1][1]),
+                reverse=True,
+            )[:beam_width]
+        )
+
+    results = []
+    for prefix, (p_blank, p_nonblank) in beams.items():
+        text = _phoneme_tokens_to_text(prefix)
+        if not text:
+            continue
+        results.append({
+            "text": text,
+            "acoustic_score": _log_add_exp(p_blank, p_nonblank),
+        })
+
+    deduped = {}
+    for result in results:
+        text = result["text"]
+        if text not in deduped or result["acoustic_score"] > deduped[text]["acoustic_score"]:
+            deduped[text] = result
+
+    return sorted(
+        deduped.values(),
+        key=lambda item: item["acoustic_score"],
+        reverse=True,
+    )
+
+def _decode_phoneme_candidates(logprobs: np.ndarray) -> list[dict]:
+    greedy_text = _greedy_decode_phonemes(logprobs)
+    candidates = [{
+        "text": greedy_text,
+        "decoder": "greedy",
+        "acoustic_score": 0.0,
+    }]
+
+    if ASR_DECODER == "beam":
+        for beam in _ctc_prefix_beam_decode(logprobs, ASR_BEAM_WIDTH, ASR_BEAM_TOP_TOKENS):
+            if beam["text"] == greedy_text:
+                continue
+            candidates.append({
+                "text": beam["text"],
+                "decoder": "beam",
+                "acoustic_score": beam["acoustic_score"],
+            })
+
+    return candidates[:max(1, ASR_BEAM_WIDTH)]
+
 def _compute_logprobs(audio: np.ndarray) -> np.ndarray:
     audio = np.nan_to_num(audio.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
     audio = audio - float(np.mean(audio))
@@ -1006,12 +1207,20 @@ def predict_audio(audio: np.ndarray, current_surah: int = 0, current_ayah: int =
     t0 = time.perf_counter()
     logprobs = _compute_logprobs(clean_audio)
     metrics["inference_time"] = round(time.perf_counter() - t0, 3)
-    
-    phoneme_text = _greedy_decode_phonemes(logprobs)
-    print(f"[Backend] Decoded Phonemes ({len(phoneme_text)} chars): {phoneme_text}")
-    
-    no_space_text = phoneme_text.replace(" ", "")
-    if len(no_space_text) < 7:  # Min 7 decoded characters (was 10)
+
+    t0 = time.perf_counter()
+    decode_candidates = _decode_phoneme_candidates(logprobs)
+    metrics["decode_time"] = round(time.perf_counter() - t0, 3)
+    metrics["decoder"] = ASR_DECODER
+    metrics["decoder_candidates"] = len(decode_candidates)
+
+    valid_decode_candidates = [
+        candidate
+        for candidate in decode_candidates
+        if len(candidate.get("text", "").replace(" ", "")) >= 7
+    ]
+    phoneme_text = decode_candidates[0]["text"] if decode_candidates else ""
+    if not valid_decode_candidates:
         return {"surah": 0, "ayah": 0, "score": 0.0, "transcript": phoneme_text, "error": "Keep reciting", "speech_detected": True, "metrics": metrics}
     
     t0 = time.perf_counter()
@@ -1019,50 +1228,73 @@ def predict_audio(audio: np.ndarray, current_surah: int = 0, current_ayah: int =
     search_verses, tracking_mode, window_str = get_search_context(current_surah, current_ayah, failed_matches, taraweeh_mode, assisted_surah, assisted_ayah, post_recovery_lock)
     
     # print(f"[Backend] Tracking: {tracking_mode} | Window: {window_str}")
-    top_matches = _match_phoneme_text(phoneme_text, top_k=5, search_verses=search_verses)
-    
-    # Apply score weighting if we are in Assisted Tracking mode
-    if assisted_ayah > 0:
-        for match in top_matches:
-            distance = abs(match["ayah"] - assisted_ayah) if match["surah"] == assisted_surah else 99
-            if distance == 1:
-                match["score"] *= 0.95
-            elif distance == 2:
-                match["score"] *= 0.90
-            elif distance > 2:
-                match["score"] *= 0.80
-        top_matches.sort(key=lambda x: x["score"], reverse=True)
-        
     best_match = None
-    for match in top_matches:
-        is_jump = False
-        if tracking_mode in ["SURAH_SEARCH", "GLOBAL_SEARCH", "SURAH_TRANSITION"]:
-            if current_surah > 0 and current_ayah > 0:
-                current_surah_verses = _by_surah.get(current_surah, [])
-                last_current_ayah = current_surah_verses[-1]["ayah"] if current_surah_verses else current_ayah
-                if match["surah"] == current_surah:
-                    distance = match["ayah"] - current_ayah
-                    # Penalize backward jumps or forward jumps > 1 ayah
-                    if distance < 0 or distance > 1:
+    top_matches = []
+    selected_decoder = "greedy"
+    selected_acoustic_score = 0.0
+
+    for candidate in valid_decode_candidates:
+        candidate_text = candidate["text"]
+        print(
+            f"[Backend] Decoded Phonemes via {candidate['decoder']} "
+            f"({len(candidate_text)} chars): {candidate_text}"
+        )
+        candidate_matches = _match_phoneme_text(candidate_text, top_k=5, search_verses=search_verses)
+
+        # Apply score weighting if we are in Assisted Tracking mode
+        if assisted_ayah > 0:
+            for match in candidate_matches:
+                distance = abs(match["ayah"] - assisted_ayah) if match["surah"] == assisted_surah else 99
+                if distance == 1:
+                    match["score"] *= 0.95
+                elif distance == 2:
+                    match["score"] *= 0.90
+                elif distance > 2:
+                    match["score"] *= 0.80
+            candidate_matches.sort(key=lambda x: x["score"], reverse=True)
+
+        if not top_matches:
+            top_matches = candidate_matches
+
+        for match in candidate_matches:
+            is_jump = False
+            if tracking_mode in ["SURAH_SEARCH", "GLOBAL_SEARCH", "SURAH_TRANSITION"]:
+                if current_surah > 0 and current_ayah > 0:
+                    current_surah_verses = _by_surah.get(current_surah, [])
+                    last_current_ayah = current_surah_verses[-1]["ayah"] if current_surah_verses else current_ayah
+                    if match["surah"] == current_surah:
+                        distance = match["ayah"] - current_ayah
+                        # Penalize backward jumps or forward jumps > 1 ayah
+                        if distance < 0 or distance > 1:
+                            is_jump = True
+                    elif match["surah"] == current_surah + 1 and tracking_mode == "SURAH_TRANSITION":
+                        is_jump = current_ayah < last_current_ayah
+                    elif taraweeh_mode:
+                        # STRICT RULE: Never jump to a different Surah during Taraweeh mode unless transitioning
                         is_jump = True
-                elif match["surah"] == current_surah + 1 and tracking_mode == "SURAH_TRANSITION":
-                    is_jump = current_ayah < last_current_ayah
-                elif taraweeh_mode:
-                    # STRICT RULE: Never jump to a different Surah during Taraweeh mode unless transitioning
-                    is_jump = True
-                    match["score"] = 0.0 # Force reject
-                else:
-                    is_jump = True
-                    
-        # Anti-jump protection
-        if is_jump and match["score"] < 0.85:
-            print(f"[Backend] Rejecting jump to {match['surah']}:{match['ayah']} due to low confidence ({match['score']:.2f})")
-            continue
-            
-        minimum_score = 0.68 if tracking_mode == "GLOBAL_SEARCH" else 0.60
-        if match["score"] >= minimum_score:
-            best_match = match
+                        match["score"] = 0.0 # Force reject
+                    else:
+                        is_jump = True
+
+            # Anti-jump protection
+            if is_jump and match["score"] < 0.85:
+                print(f"[Backend] Rejecting jump to {match['surah']}:{match['ayah']} due to low confidence ({match['score']:.2f})")
+                continue
+
+            minimum_score = 0.68 if tracking_mode == "GLOBAL_SEARCH" else 0.60
+            if match["score"] >= minimum_score:
+                best_match = match
+                phoneme_text = candidate_text
+                top_matches = candidate_matches
+                selected_decoder = candidate["decoder"]
+                selected_acoustic_score = float(candidate.get("acoustic_score", 0.0) or 0.0)
+                break
+
+        if best_match:
             break
+
+    metrics["selected_decoder"] = selected_decoder
+    metrics["selected_acoustic_score"] = round(selected_acoustic_score, 3)
     metrics["matching_time"] = round(time.perf_counter() - t0, 3)
     metrics["total_latency"] = round(time.perf_counter() - t_start, 3)
     

@@ -45,8 +45,24 @@ app.*.map.json
 /android/app/release
 node_modules/
 .venv/
+tmp/
 
 *.onnx
 
 # APK files
 *.apk
+
+# Local live-device diagnostics and one-off debugging artifacts
+adb-*.xml
+adb-*.png
+adb-*.log
+live-*.xml
+live-*.png
+live-*.marker.txt
+backend-*.out.log
+backend-*.err.log
+scratch_*.txt
+recovered.txt
+fix.py
+patch.py
+test_squash.py
