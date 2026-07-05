@@ -268,6 +268,33 @@
 - Confirmed rewind/repetition is now treated as reciter tracking, not `mistake_detected`.
 - Luqmah should come from wrong-word/tail mismatch, foreign-surah recitation, impossible fast forward jumps, or no-progress/stuck behavior, not from a Hafiz repeating earlier ayahs.
 
+## Adaptive trie-constrained beam - July 6, 2026
+
+### Change
+
+- Backend default decoder changed from `greedy` to `context_beam`.
+- The existing trie-constrained CTC beam is no longer only a fallback.
+- In small Taraweeh/local windows, backend now includes context-beam candidates in the first pass.
+- Full-surah/global search still avoids first-pass beam to protect latency and avoid over-constraining recovery.
+
+### Verification
+
+- Stateful CPU replay: `4/4 passed`
+  - Rahman correct: final `55:78`, `0` corrections, avg latency `0.261s`
+  - Qiyamah correct: final `75:40`, `0` corrections, avg latency `0.237s`
+  - Rahman wrong: `3` corrections, including `55:24` tail mismatch
+  - Qiyamah wrong: `1` foreign-surah correction
+- Stateless CPU replay: `4/4 passed`
+  - Rahman correct: final `55:78`, avg latency `0.253s`
+  - Qiyamah correct: final `75:40`, avg latency `0.244s`
+  - Rahman wrong: final `55:25`, avg latency `0.257s`
+  - Qiyamah wrong: final `75:19`, avg latency `0.243s`
+- Decoder usage in stateless replay:
+  - Rahman correct: `greedy=291`, `context_beam=37`
+  - Qiyamah correct: `greedy=157`, `context_beam=12`
+  - Rahman wrong: `greedy=91`, `context_beam=20`
+  - Qiyamah wrong: `greedy=41`, `context_beam=34`
+
 ### Live observations
 
 - Wrong other-surah recitation at `55:16` worked:

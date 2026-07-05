@@ -44,12 +44,20 @@ LUQMAH_EVENT_LOG_PATH = Path(os.environ.get("QURAN_LUQMAH_LOG_PATH", "logs/luqma
 # because the current Q8 model can be slower on older GTX CUDA due copy overhead.
 # Use QURAN_ASR_PROVIDER=cuda or start_backend_cuda.ps1 for explicit GPU runs.
 ASR_PROVIDER = os.environ.get("QURAN_ASR_PROVIDER", "cpu").strip().lower()
-ASR_DECODER = os.environ.get("QURAN_ASR_DECODER", "greedy").strip().lower()
+ASR_DECODER = os.environ.get("QURAN_ASR_DECODER", "context_beam").strip().lower()
 ASR_BEAM_WIDTH = max(1, int(os.environ.get("QURAN_ASR_BEAM_WIDTH", "8")))
 ASR_BEAM_TOP_TOKENS = max(2, int(os.environ.get("QURAN_ASR_BEAM_TOP_TOKENS", "10")))
 ASR_CONTEXT_BEAM_MAX_VERSES = max(1, int(os.environ.get("QURAN_ASR_CONTEXT_BEAM_MAX_VERSES", "160")))
 ASR_CONTEXT_BEAM_MAX_SEQUENCES = max(64, int(os.environ.get("QURAN_ASR_CONTEXT_BEAM_MAX_SEQUENCES", "2500")))
 ASR_CONTEXT_BEAM_SPAN_VERSES = max(1, int(os.environ.get("QURAN_ASR_CONTEXT_BEAM_SPAN_VERSES", "3")))
+ASR_CONTEXT_BEAM_FIRST_PASS = os.environ.get(
+    "QURAN_ASR_CONTEXT_BEAM_FIRST_PASS",
+    "adaptive",
+).strip().lower()
+ASR_CONTEXT_BEAM_FIRST_PASS_MAX_VERSES = max(
+    1,
+    int(os.environ.get("QURAN_ASR_CONTEXT_BEAM_FIRST_PASS_MAX_VERSES", "18")),
+)
 
 # Vocab Definition
 PHONEME_VOCAB = [
@@ -1349,6 +1357,32 @@ def _ctc_context_beam_decode(
         "trie_nodes": len(trie),
     }
 
+def _use_context_beam_first_pass(
+    search_verses: list[dict] | None,
+    tracking_mode: str,
+    taraweeh_mode: bool,
+    failed_matches: int,
+    assisted_ayah: int,
+    post_recovery_lock: bool,
+) -> bool:
+    if ASR_DECODER != "context_beam":
+        return False
+    mode = ASR_CONTEXT_BEAM_FIRST_PASS
+    if mode in {"0", "false", "off", "fallback", "deferred"}:
+        return False
+    if mode in {"1", "true", "on", "always"}:
+        return True
+    if not search_verses or len(search_verses) > ASR_CONTEXT_BEAM_FIRST_PASS_MAX_VERSES:
+        return False
+    if tracking_mode in {"GLOBAL_SEARCH", "SURAH_SEARCH"}:
+        return False
+    return bool(
+        taraweeh_mode
+        or failed_matches > 0
+        or assisted_ayah > 0
+        or post_recovery_lock
+    )
+
 def _decode_phoneme_candidates(
     logprobs: np.ndarray,
     search_verses: list[dict] | None = None,
@@ -1595,12 +1629,22 @@ def predict_audio(audio: np.ndarray, current_surah: int = 0, current_ayah: int =
     # Dynamic Search Context. Beam decoding can use this to constrain fallback
     # candidates to the active local/Taraweeh Quran window.
     search_verses, tracking_mode, window_str = get_search_context(current_surah, current_ayah, failed_matches, taraweeh_mode, assisted_surah, assisted_ayah, post_recovery_lock)
+    first_pass_context_beam = _use_context_beam_first_pass(
+        search_verses,
+        tracking_mode,
+        taraweeh_mode,
+        failed_matches,
+        assisted_ayah,
+        post_recovery_lock,
+    )
+    metrics["context_beam_first_pass"] = first_pass_context_beam
+    metrics["context_beam_first_pass_mode"] = ASR_CONTEXT_BEAM_FIRST_PASS
 
     t0 = time.perf_counter()
     decode_candidates, decoder_diagnostics = _decode_phoneme_candidates(
         logprobs,
         search_verses,
-        include_beam=False,
+        include_beam=first_pass_context_beam,
     )
     metrics["decode_time"] = round(time.perf_counter() - t0, 3)
     metrics["decoder"] = ASR_DECODER
@@ -1697,10 +1741,14 @@ def predict_audio(audio: np.ndarray, current_surah: int = 0, current_ayah: int =
         metrics["beam_decode_time"] = round(time.perf_counter() - t_beam, 3)
         metrics["decoder_candidates"] = len(beam_candidates)
         metrics["context_beam"] = decoder_diagnostics.get("context_beam", {})
+        already_tried = {candidate.get("text", "") for candidate in valid_decode_candidates}
         beam_only_candidates = [
             candidate
-            for candidate in beam_candidates[1:]
-            if len(candidate.get("text", "").replace(" ", "")) >= 7
+            for candidate in beam_candidates
+            if (
+                candidate.get("text", "") not in already_tried
+                and len(candidate.get("text", "").replace(" ", "")) >= 7
+            )
         ]
         if beam_only_candidates:
             best_match = try_decode_candidates(beam_only_candidates)
