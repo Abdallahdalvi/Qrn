@@ -3,6 +3,8 @@ import json
 import math
 import os
 import time
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 import numpy as np
 import onnxruntime as ort
@@ -36,6 +38,7 @@ def health_check():
 # Paths
 ONNX_MODEL_PATH = Path("assets/web/fastconformer_phoneme_q8.onnx")
 QURAN_PHONEMES_PATH = Path("assets/web/quran_phonemes.json")
+LUQMAH_EVENT_LOG_PATH = Path(os.environ.get("QURAN_LUQMAH_LOG_PATH", "logs/luqmah_events.jsonl"))
 
 # Runtime knobs. Defaults are intentionally conservative: CPU stays default
 # because the current Q8 model can be slower on older GTX CUDA due copy overhead.
@@ -78,6 +81,42 @@ MUTASHABIHAT_DB = {
 _onnx_session = None
 _verses = []
 _by_surah = {}
+
+def _json_default(value):
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        return float(value)
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, Path):
+        return str(value)
+    return str(value)
+
+def _utc_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+def _safe_float(value, digits: int = 4):
+    try:
+        return round(float(value), digits)
+    except (TypeError, ValueError):
+        return value
+
+def _record_luqmah_event(event: dict):
+    """Append one Luqmah decision to a JSONL audit trail."""
+    try:
+        payload = {
+            "schema_version": 1,
+            "event_id": uuid.uuid4().hex,
+            "timestamp_utc": _utc_timestamp(),
+            **event,
+        }
+        LUQMAH_EVENT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with LUQMAH_EVENT_LOG_PATH.open("a", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, default=_json_default)
+            handle.write("\n")
+    except Exception as exc:
+        print(f"[Backend] Failed to write Luqmah audit event: {exc}")
 
 def _make_session_options() -> ort.SessionOptions:
     options = ort.SessionOptions()
@@ -1881,6 +1920,75 @@ async def websocket_recitation(websocket: WebSocket):
     last_progress_time = time.time()
     has_committed_match = False
     last_ayah_change_time = time.time()
+    session_id = uuid.uuid4().hex
+    session_started_at = time.time()
+
+    def audit_luqmah(
+        *,
+        decision_type: str,
+        reason: str,
+        expected_surah: int,
+        expected_ayah: int,
+        detected_surah: int = 0,
+        detected_ayah: int = 0,
+        confidence: float = 0.0,
+        result: dict | None = None,
+        details: dict | None = None,
+    ):
+        result = result or {}
+        metrics = result.get("metrics", {}) or {}
+        _record_luqmah_event({
+            "session_id": session_id,
+            "session_age_sec": _safe_float(time.time() - session_started_at, 3),
+            "decision_type": decision_type,
+            "reason": reason,
+            "expected": {
+                "surah": int(expected_surah or 0),
+                "ayah": int(expected_ayah or 0),
+                "text": get_ayah_text(int(expected_surah or 0), int(expected_ayah or 0)),
+            },
+            "detected": {
+                "surah": int(detected_surah or 0),
+                "ayah": int(detected_ayah or 0),
+                "text": get_ayah_text(int(detected_surah or 0), int(detected_ayah or 0)),
+            },
+            "confidence": _safe_float(confidence),
+            "state": {
+                "current_surah": current_surah,
+                "current_ayah": current_ayah,
+                "current_progress_coverage": _safe_float(current_progress_coverage),
+                "current_word_index": current_word_index,
+                "failed_local_matches": failed_local_matches,
+                "taraweeh_mode": taraweeh_mode,
+                "assisted_surah": assisted_surah,
+                "assisted_ayah": assisted_ayah,
+                "post_recovery_lock": post_recovery_lock,
+                "pending_forward": {
+                    "surah": pending_forward_surah,
+                    "ayah": pending_forward_ayah,
+                    "count": pending_forward_count,
+                },
+                "pending_mistake_count": pending_mistake_count,
+                "pending_tail_mismatch_count": pending_tail_mismatch_count,
+                "audio_buffer_sec": _safe_float(len(audio_buffer) / 16000.0, 3),
+            },
+            "recognition": {
+                "matched_surah": result.get("surah", 0),
+                "matched_ayah": result.get("ayah", 0),
+                "matched_ayah_end": result.get("ayah_end", 0),
+                "score": _safe_float(result.get("score", 0.0)),
+                "word_index": result.get("word_index", 0),
+                "total_words": result.get("total_words", 0),
+                "word_confidence": _safe_float(result.get("word_confidence", 0.0)),
+                "progress_coverage": _safe_float(result.get("progress_coverage", 0.0)),
+                "tracking_mode": result.get("tracking_mode", ""),
+                "search_window": result.get("search_window", ""),
+                "transcript": result.get("transcript", ""),
+                "decoder": metrics.get("selected_decoder", metrics.get("decoder", "")),
+                "metrics": metrics,
+            },
+            "details": details or {},
+        })
     
     try:
         while True:
@@ -2025,6 +2133,29 @@ async def websocket_recitation(websocket: WebSocket):
                                 assisted_surah = first_prompt["surah"]
                                 assisted_ayah = first_prompt["ayah"]
                                 print(f"[Backend] Assisted prompt pinned to {assisted_surah}:{assisted_ayah}")
+                                audit_luqmah(
+                                    decision_type="assisted_prompt",
+                                    reason="assisted_prompt",
+                                    expected_surah=first_prompt["surah"],
+                                    expected_ayah=first_prompt["ayah"],
+                                    detected_surah=0,
+                                    detected_ayah=0,
+                                    confidence=1.0,
+                                    details={
+                                        "requested_surah": requested_surah,
+                                        "requested_ayah": requested_ayah,
+                                        "prompt_count": prompt_count,
+                                        "prompt_word_index": prompt_word_index,
+                                        "prompt_verses": [
+                                            {
+                                                "surah": v.get("surah", 0),
+                                                "ayah": v.get("ayah", 0),
+                                                "word_index": v.get("word_index", 0),
+                                            }
+                                            for v in prompt_verses
+                                        ],
+                                    },
+                                )
                                 await websocket.send_json({
                                     "type": "assisted_verse_text",
                                     "ayah_text": "\n".join(v.get("prompt_text") or v["ayah_text"] for v in prompt_verses),
@@ -2330,6 +2461,24 @@ async def websocket_recitation(websocket: WebSocket):
                                         f"(elapsed={elapsed_since_ayah_change:.1f}s, "
                                         f"min={min_forward_elapsed:.1f}s)"
                                     )
+                                    audit_luqmah(
+                                        decision_type="mistake_detected",
+                                        reason="forward_jump",
+                                        expected_surah=expected_surah,
+                                        expected_ayah=expected_ayah,
+                                        detected_surah=matched_surah,
+                                        detected_ayah=matched_ayah,
+                                        confidence=result.get("score", 0.0),
+                                        result=result,
+                                        details={
+                                            "skipped_ayahs": skipped_ayahs,
+                                            "forward_section_distance": forward_section_distance,
+                                            "confirmations": pending_forward_count,
+                                            "required_confirmations": required_forward_confirmations,
+                                            "elapsed_since_ayah_change": _safe_float(elapsed_since_ayah_change, 3),
+                                            "minimum_elapsed": _safe_float(min_forward_elapsed, 3),
+                                        },
+                                    )
                                     await websocket.send_json({
                                         "type": "mistake_detected",
                                         "expected_surah": expected_surah,
@@ -2454,6 +2603,22 @@ async def websocket_recitation(websocket: WebSocket):
 
                         word_confidence = result.get("word_confidence", 1.0)
                         if _should_emit_word_correction(result, word_confidence):
+                            audit_luqmah(
+                                decision_type="word_correction",
+                                reason="low_confidence",
+                                expected_surah=result["surah"],
+                                expected_ayah=result["ayah"],
+                                detected_surah=result["surah"],
+                                detected_ayah=result["ayah"],
+                                confidence=word_confidence,
+                                result=result,
+                                details={
+                                    "word_index": result["word_index"],
+                                    "expected_word": result["word_expected"],
+                                    "heard_word": result["word_got"],
+                                    "error_type": "low_confidence",
+                                },
+                            )
                             await websocket.send_json({
                                 "type": "word_correction",
                                 "surah": result["surah"],
@@ -2498,16 +2663,36 @@ async def websocket_recitation(websocket: WebSocket):
                                     f"(strict={tail_mismatch['strict_ratio']}, "
                                     f"skeleton={tail_mismatch['skeleton_ratio']})"
                                 )
+                                tail_score = max(
+                                    0.01,
+                                    1.0 - tail_mismatch["skeleton_ratio"],
+                                )
+                                audit_luqmah(
+                                    decision_type="mistake_detected",
+                                    reason="tail_mismatch",
+                                    expected_surah=current_surah,
+                                    expected_ayah=current_ayah,
+                                    detected_surah=current_surah,
+                                    detected_ayah=current_ayah,
+                                    confidence=tail_score,
+                                    result=result,
+                                    details={
+                                        "raw_reason": "same_ayah_tail_mismatch",
+                                        "word_index": tail_mismatch["word_index"],
+                                        "expected_word": tail_mismatch["expected"],
+                                        "heard_word": tail_mismatch["got"],
+                                        "strict_ratio": tail_mismatch["strict_ratio"],
+                                        "skeleton_ratio": tail_mismatch["skeleton_ratio"],
+                                        "confirmations": pending_tail_mismatch_count,
+                                    },
+                                )
                                 await websocket.send_json({
                                     "type": "mistake_detected",
                                     "expected_surah": current_surah,
                                     "expected_ayah": current_ayah,
                                     "detected_surah": current_surah,
                                     "detected_ayah": current_ayah,
-                                    "score": max(
-                                        0.01,
-                                        1.0 - tail_mismatch["skeleton_ratio"],
-                                    ),
+                                    "score": tail_score,
                                     "reason": "same_ayah_tail_mismatch",
                                     "word_index": tail_mismatch["word_index"],
                                     "expected_word": tail_mismatch["expected"],
@@ -2705,6 +2890,31 @@ async def websocket_recitation(websocket: WebSocket):
 
                                 if pending_mistake_count >= required_confirmations:
                                     print(f"[Backend] Sending mistake correction for {result['mistake_surah']}:{result['mistake_ayah']}")
+                                    audit_reason = (
+                                        "foreign_surah"
+                                        if mistake_reason == "foreign_recitation"
+                                        else (mistake_reason or "mistake_candidate")
+                                    )
+                                    audit_luqmah(
+                                        decision_type="mistake_detected",
+                                        reason=audit_reason,
+                                        expected_surah=expected_surah,
+                                        expected_ayah=expected_ayah,
+                                        detected_surah=result["mistake_surah"],
+                                        detected_ayah=result["mistake_ayah"],
+                                        confidence=result.get("mistake_score", 0.0),
+                                        result=result,
+                                        details={
+                                            "raw_reason": mistake_reason or "mistake_candidate",
+                                            "confirmations": pending_mistake_count,
+                                            "required_confirmations": required_confirmations,
+                                            "mistake_immediate": bool(result.get("mistake_immediate")),
+                                            "transcript_chars": transcript_chars,
+                                            "expected_is_ambiguous": expected_is_ambiguous,
+                                            "detected_is_ambiguous": detected_is_ambiguous,
+                                            "foreign_immediate_allowed": foreign_immediate_allowed,
+                                        },
+                                    )
                                     await websocket.send_json({
                                         "type": "mistake_detected",
                                         "expected_surah": expected_surah,
@@ -2767,6 +2977,26 @@ async def websocket_recitation(websocket: WebSocket):
                                     current_ayah,
                                     current_progress_coverage,
                                     taraweeh_mode,
+                                )
+                                audit_luqmah(
+                                    decision_type="pause_prompt",
+                                    reason="pause",
+                                    expected_surah=expected_surah,
+                                    expected_ayah=expected_ayah,
+                                    detected_surah=0,
+                                    detected_ayah=0,
+                                    confidence=0.0,
+                                    result=result,
+                                    details={
+                                        "raw_reason": "no_context_progress",
+                                        "failed_local_matches": failed_local_matches,
+                                        "required_failures": required_failures,
+                                        "stall_seconds": _safe_float(stall_seconds, 3),
+                                        "seconds_since_progress": _safe_float(
+                                            time.time() - last_progress_time,
+                                            3,
+                                        ),
+                                    },
                                 )
                                 await websocket.send_json({
                                     "type": "status",

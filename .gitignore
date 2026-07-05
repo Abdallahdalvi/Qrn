@@ -48,6 +48,7 @@ node_modules/
 tmp/
 tmp-*
 tmp-models/
+logs/
 
 *.onnx
 !assets/web/*.onnx
