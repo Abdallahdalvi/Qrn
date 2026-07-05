@@ -46,18 +46,27 @@ $env:QURAN_ASR_PROVIDER = "cuda"
 .\.venv\Scripts\python.exe -m uvicorn backend:app --host 0.0.0.0 --port 8000
 ```
 
+Or use the helper:
+
+```powershell
+.\start_backend_cuda.ps1 -Install -Decoder context_beam
+```
+
+CPU remains the default backend provider. Use CUDA intentionally and compare regression latency before keeping it on for a machine/model pair.
+
 Decoder options:
 
 ```powershell
-$env:QURAN_ASR_DECODER = "greedy"  # default, safest
-$env:QURAN_ASR_DECODER = "beam"    # opt-in CTC prefix beam fallback
+$env:QURAN_ASR_DECODER = "greedy"       # default, safest
+$env:QURAN_ASR_DECODER = "context_beam" # local Quran-window CTC beam fallback
+$env:QURAN_ASR_DECODER = "beam"         # context beam, then generic beam if no context exists
 ```
 
 Regression replay:
 
 ```powershell
 .\.venv\Scripts\python.exe tool\asr_regression.py --manifest tool\asr_regression_manifest.example.json --decoder greedy --out tmp\asr_greedy.json
-.\.venv\Scripts\python.exe tool\asr_regression.py --manifest tool\asr_regression_manifest.example.json --decoder beam --out tmp\asr_beam.json
+.\.venv\Scripts\python.exe tool\asr_regression.py --manifest tool\asr_regression_manifest.example.json --decoder context_beam --out tmp\asr_context_beam.json
 ```
 
 Enjoy your recitation with your new AI teacher!

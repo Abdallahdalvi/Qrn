@@ -3,4 +3,4 @@ uvicorn[standard]==0.49.0
 numpy==2.4.6
 librosa==0.11.0
 Levenshtein==0.27.3
-onnxruntime-gpu==1.26.0
+onnxruntime-gpu[cuda,cudnn]==1.26.0

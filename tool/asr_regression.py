@@ -213,8 +213,8 @@ def main() -> int:
     parser.add_argument("--expected-final-surah", type=int, default=0)
     parser.add_argument("--expected-final-ayah-min", type=int, default=0)
     parser.add_argument("--expected-final-ayah-max", type=int, default=0)
-    parser.add_argument("--provider", default="auto", choices=["auto", "cpu", "cuda"])
-    parser.add_argument("--decoder", default="greedy", choices=["greedy", "beam"])
+    parser.add_argument("--provider", default="cpu", choices=["auto", "cpu", "cuda"])
+    parser.add_argument("--decoder", default="greedy", choices=["greedy", "beam", "context_beam"])
     parser.add_argument("--out", help="Write detailed JSON results to this path.")
     args = parser.parse_args()
 
