@@ -44,11 +44,43 @@
       "expected_final_ayah_max": 40,
       "expected_corrections": [
         {
-          "label": "foreign surah recited while locked to Qiyamah",
-          "reason": "foreign_surah",
+          "label": "Qiyamah 75:4 wrong recitation",
+          "reasons": [
+            "tail_mismatch",
+            "low_confidence",
+            "foreign_surah"
+          ],
           "expected_surah": 75,
+          "expected_ayah": 4,
+          "t_min": 14.0,
+          "t_max": 23.0
+        },
+        {
+          "label": "Qiyamah jump from 75:10 to 75:14",
+          "reason": "forward_jump",
+          "expected_surah": 75,
+          "expected_ayah": 11,
+          "detected_surah": 75,
+          "t_min": 32.0,
+          "t_max": 45.0
+        },
+        {
+          "label": "Qiyamah wrong 75:18 after 75:16",
+          "reasons": [
+            "forward_jump",
+            "foreign_surah"
+          ],
+          "expected_surah": 75,
+          "expected_ayah": 17,
           "t_min": 85.0,
           "t_max": 100.0
+        }
+      ],
+      "expected_non_corrections": [
+        {
+          "label": "Qiyamah 75:13 stutter should not be treated as a separate mistake",
+          "t_min": 33.0,
+          "t_max": 37.0
         }
       ]
     }

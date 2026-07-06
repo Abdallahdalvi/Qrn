@@ -168,6 +168,27 @@ def _validate_expected_corrections(
     return failures, checks
 
 
+def _validate_expected_non_corrections(
+    events: list[dict[str, Any]],
+    case: dict[str, Any],
+) -> tuple[list[str], list[dict[str, Any]]]:
+    failures: list[str] = []
+    checks: list[dict[str, Any]] = []
+    for index, expected in enumerate(case.get("expected_non_corrections", []) or [], start=1):
+        label = expected.get("label") or f"expected no correction {index}"
+        matches = [event for event in events if _event_matches_expected(event, expected)]
+        matched = matches[0] if matches else None
+        checks.append({
+            "label": label,
+            "matched": matched is None,
+            "expected": expected,
+            "event": matched,
+        })
+        if matched is not None:
+            failures.append(f"Unexpected correction during no-prompt window: {label}")
+    return failures, checks
+
+
 def _format_pct(numerator: int, denominator: int) -> str:
     if denominator <= 0:
         return "n/a"
@@ -188,6 +209,8 @@ def _expected_status_line(check: dict[str, Any]) -> str:
     details: list[str] = []
     if expected.get("reason"):
         details.append(str(expected["reason"]))
+    elif expected.get("reasons"):
+        details.append("/".join(str(reason) for reason in expected["reasons"]))
     if expected.get("expected_surah") and expected.get("expected_ayah"):
         details.append(f"expected {expected['expected_surah']}:{expected['expected_ayah']}")
     if event:
@@ -196,6 +219,21 @@ def _expected_status_line(check: dict[str, Any]) -> str:
             f"detected {event.get('detected_surah')}:{event.get('detected_ayah')}"
         )
     return f"{status} {check.get('label', 'expected correction')} ({'; '.join(details)})"
+
+
+def _non_correction_status_line(check: dict[str, Any]) -> str:
+    status = "PASS" if check.get("matched") else "FAIL"
+    expected = check.get("expected", {}) or {}
+    event = check.get("event") or {}
+    details: list[str] = []
+    if expected.get("t_min") is not None and expected.get("t_max") is not None:
+        details.append(f"{expected['t_min']}-{expected['t_max']}s")
+    if event:
+        details.append(
+            f"unexpected {event.get('reason')} at {event.get('t')}s "
+            f"expected {event.get('expected_surah')}:{event.get('expected_ayah')}"
+        )
+    return f"{status} no-prompt: {check.get('label', 'expected no correction')} ({'; '.join(details)})"
 
 
 def _build_regression_report(results: list[dict[str, Any]], label: str) -> str:
@@ -209,6 +247,12 @@ def _build_regression_report(results: list[dict[str, Any]], label: str) -> str:
         for check in result.get("expected_corrections", [])
     ]
     expected_passed = sum(1 for check in expected_checks if check.get("matched"))
+    no_prompt_checks = [
+        check
+        for result in wrong
+        for check in result.get("expected_non_corrections", [])
+    ]
+    no_prompt_passed = sum(1 for check in no_prompt_checks if check.get("matched"))
 
     lines: list[str] = [
         label,
@@ -240,6 +284,12 @@ def _build_regression_report(results: list[dict[str, Any]], label: str) -> str:
             else:
                 corrections = len(result.get("correction_events", []))
                 lines.append(f"No individual expected corrections configured; observed {corrections} correction(s).")
+            no_prompt = result.get("expected_non_corrections", [])
+            if no_prompt:
+                for check in no_prompt:
+                    lines.append(_non_correction_status_line(check))
+                clean = sum(1 for check in no_prompt if check.get("matched"))
+                lines.append(f"No-prompt guards: {clean}/{len(no_prompt)} ({_format_pct(clean, len(no_prompt))})")
             lines.append("")
             lines.append("--------------------")
             lines.append("")
@@ -252,6 +302,7 @@ def _build_regression_report(results: list[dict[str, Any]], label: str) -> str:
         "",
         f"Correct: {correct_passed}/{len(correct)} ({_format_pct(correct_passed, len(correct))})",
         f"Wrong: {expected_passed}/{len(expected_checks)} ({_format_pct(expected_passed, len(expected_checks))})",
+        f"No-Prompt: {no_prompt_passed}/{len(no_prompt_checks)} ({_format_pct(no_prompt_passed, len(no_prompt_checks))})",
         f"Overall Detection: {_format_pct(correct_passed + expected_passed, len(correct) + len(expected_checks))}",
     ])
     return "\n".join(lines).rstrip() + "\n"
@@ -629,6 +680,8 @@ def _run_case(backend, case: dict[str, Any], manifest_path: Path | None) -> dict
         failures.append(f"Only {len(events)} correction(s), expected at least {expected_mistake_min}")
     expected_failures, expected_checks = _validate_expected_corrections(events, case)
     failures.extend(expected_failures)
+    no_prompt_failures, no_prompt_checks = _validate_expected_non_corrections(events, case)
+    failures.extend(no_prompt_failures)
     expected_final_surah = int(case.get("expected_final_surah", 0) or 0)
     if expected_final_surah and current_surah != expected_final_surah:
         failures.append(f"Final surah {current_surah}, expected {expected_final_surah}")
@@ -650,6 +703,7 @@ def _run_case(backend, case: dict[str, Any], manifest_path: Path | None) -> dict
         "final_ayah": current_ayah,
         "correction_events": events,
         "expected_corrections": expected_checks,
+        "expected_non_corrections": no_prompt_checks,
         "verse_hits": verse_hits,
         "summary": {
             "windows": max(0, (len(audio) - start) // stride + 1),
