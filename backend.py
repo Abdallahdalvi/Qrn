@@ -585,7 +585,7 @@ def _minimum_forward_jump_elapsed_seconds(
     # This is intentionally a lower bound, not a normal recitation estimate.
     # If the target appears faster than this, the reciter almost certainly
     # skipped over intervening ayahs instead of merely reciting quickly.
-    return max(1.4 * skipped_ayahs, 0.42 * skipped_words)
+    return max(1.8 * skipped_ayahs, 0.58 * skipped_words)
 
 def _phrase_boundary_for_luqmah(verse: dict, word_index: int = 0) -> dict:
     text = verse.get("text_uthmani", "")
@@ -762,6 +762,7 @@ def _same_ayah_tail_mismatch(result: dict) -> dict | None:
     section_index = int(result.get("section_index", 0) or 0)
     total_sections = int(result.get("total_sections", 0) or 0)
     match_score = float(result.get("score", 0.0) or 0.0)
+    word_confidence = float(result.get("word_confidence", 1.0) or 0.0)
 
     if not (
         surah > 0
@@ -784,10 +785,7 @@ def _same_ayah_tail_mismatch(result: dict) -> dict | None:
     if not near_tail:
         return None
 
-    if match_score < 0.63:
-        return None
-
-    if _is_ambiguous_signature_verse(surah, ayah):
+    if match_score < 0.58:
         return None
 
     transcript_words = result.get("transcript", "").strip().split()
@@ -797,6 +795,30 @@ def _same_ayah_tail_mismatch(result: dict) -> dict | None:
     for tail_len in (2, 3):
         if len(transcript_words) >= tail_len:
             got_candidates.append("".join(transcript_words[-tail_len:]))
+
+    if progress_coverage >= 0.95:
+        next_verse = get_verse(surah, ayah + 1) or {}
+        next_words = [
+            w for w in (next_verse.get("phoneme_words") or next_verse.get("phonemes_joined", "").split())
+            if str(w).strip()
+        ]
+        next_openings = []
+        for opening_len in (1, 2, 3):
+            if len(next_words) >= opening_len:
+                next_openings.append("".join(next_words[:opening_len]))
+        for got_candidate in got_candidates:
+            got_key = _squash(got_candidate)
+            if len(got_key) < 5:
+                continue
+            for opening in next_openings:
+                opening_key = _squash(opening)
+                if len(opening_key) < 5:
+                    continue
+                if (
+                    robust_ratio(got_key, opening_key) >= 0.72
+                    or fragment_score(got_key, opening_key) >= 0.72
+                ):
+                    return None
 
     verse = get_verse(surah, ayah) or {}
     phoneme_words = [
@@ -812,6 +834,17 @@ def _same_ayah_tail_mismatch(result: dict) -> dict | None:
     best_skeleton_ratio = 0.0
     best_expected = expected
     best_got = got
+    primary_strict_ratio = ratio(_squash(got), _squash(expected))
+    primary_skeleton_ratio = ratio(
+        _phoneme_skeleton(got),
+        _phoneme_skeleton(expected),
+    )
+    primary_expected_len = len(_squash(expected))
+    primary_got_len = len(_squash(got))
+    primary_has_word_length = (
+        primary_expected_len >= 5
+        and primary_got_len >= max(4, math.ceil(primary_expected_len * 0.55))
+    )
     for expected_candidate in expected_candidates:
         expected_key = _squash(expected_candidate)
         expected_skeleton = _phoneme_skeleton(expected_candidate)
@@ -834,10 +867,31 @@ def _same_ayah_tail_mismatch(result: dict) -> dict | None:
             best_strict_ratio = max(best_strict_ratio, strict_ratio)
             best_skeleton_ratio = max(best_skeleton_ratio, skeleton_ratio)
 
+    strong_low_confidence_mismatch = (
+        word_confidence < 0.52
+        and progress_coverage >= 0.85
+        and match_score >= 0.58
+        and primary_has_word_length
+        and primary_strict_ratio < 0.62
+        and primary_skeleton_ratio < 0.48
+    )
+    if strong_low_confidence_mismatch:
+        best_expected = expected
+        best_got = got
+        best_strict_ratio = primary_strict_ratio
+        best_skeleton_ratio = primary_skeleton_ratio
+
     # Overall ayah matching can hide a bad final word because nearby words raise
     # sequence confidence. Require the consonant skeleton to disagree strongly,
     # and confirm it twice in the websocket loop before playing Luqmah.
-    if best_strict_ratio >= 0.78 or best_skeleton_ratio >= 0.55:
+    if (
+        best_strict_ratio >= 0.78 or best_skeleton_ratio >= 0.55
+    ) and not strong_low_confidence_mismatch:
+        return None
+    if match_score < 0.63 and not strong_low_confidence_mismatch:
+        return None
+
+    if _is_ambiguous_signature_verse(surah, ayah) and not strong_low_confidence_mismatch:
         return None
 
     return {
@@ -846,6 +900,7 @@ def _same_ayah_tail_mismatch(result: dict) -> dict | None:
         "got": best_got,
         "strict_ratio": round(best_strict_ratio, 4),
         "skeleton_ratio": round(best_skeleton_ratio, 4),
+        "immediate": strong_low_confidence_mismatch,
     }
 
 def _should_emit_word_correction(result: dict, word_confidence: float) -> bool:
@@ -2442,6 +2497,7 @@ async def websocket_recitation(websocket: WebSocket):
                             })
                             continue
 
+                        forward_recovery_ayah = 0
                         if (
                             taraweeh_mode
                             and current_surah > 0
@@ -2450,25 +2506,57 @@ async def websocket_recitation(websocket: WebSocket):
                             and required_forward_confirmations > 0
                             and assisted_ayah == 0
                         ):
-                            if pending_forward_surah == matched_surah and pending_forward_ayah == matched_ayah:
+                            same_forward_region = (
+                                pending_forward_surah == matched_surah
+                                and pending_forward_ayah > current_ayah
+                                and abs(matched_ayah - pending_forward_ayah) <= 3
+                            )
+                            if same_forward_region:
                                 pending_forward_count += 1
+                                pending_forward_ayah = max(pending_forward_ayah, matched_ayah)
                             else:
                                 pending_forward_surah = matched_surah
                                 pending_forward_ayah = matched_ayah
                                 pending_forward_count = 1
 
-                            if pending_forward_count < required_forward_confirmations:
+                            effective_matched_ayah = max(matched_ayah, pending_forward_ayah)
+                            effective_skipped_ayahs = max(
+                                0,
+                                effective_matched_ayah - current_ayah - 1,
+                            )
+                            effective_forward_distance = _forward_section_distance(
+                                current_surah,
+                                current_ayah,
+                                current_progress_coverage,
+                                effective_matched_ayah,
+                                (
+                                    result.get("section_index", 0)
+                                    if effective_matched_ayah == matched_ayah
+                                    else 1
+                                ),
+                            )
+                            effective_required_confirmations = min(
+                                required_forward_confirmations,
+                                _required_forward_jump_confirmations(
+                                    effective_skipped_ayahs,
+                                    effective_forward_distance,
+                                    current_progress_coverage,
+                                    result.get("score", 0.0),
+                                ),
+                            )
+
+                            if pending_forward_count < effective_required_confirmations:
                                 skipped_message = (
-                                    f" skipping {skipped_ayahs} ayah(s);"
-                                    if skipped_ayahs > 0
+                                    f" skipping {effective_skipped_ayahs} ayah(s);"
+                                    if effective_skipped_ayahs > 0
                                     else ""
                                 )
                                 await websocket.send_json({
                                     "type": "status",
                                     "message": (
-                                        f"Possible forward jump to Ayah {matched_ayah} "
-                                        f"({forward_section_distance} sections ahead;{skipped_message} "
-                                        f"confirmation {pending_forward_count}/{required_forward_confirmations})."
+                                        f"Possible forward jump to Ayah {effective_matched_ayah} "
+                                        f"({effective_forward_distance} sections ahead;{skipped_message} "
+                                        f"confirmation {pending_forward_count}/{effective_required_confirmations})."
                                     ),
                                     "tracking_mode": "FORWARD_JUMP_CHECK",
                                     "search_window": result.get("search_window", ""),
@@ -2476,16 +2564,29 @@ async def websocket_recitation(websocket: WebSocket):
                                     "metrics": result.get("metrics", {})
                                 })
                                 continue
-                            if skipped_ayahs > 0:
+                            if effective_skipped_ayahs > 0:
                                 elapsed_since_ayah_change = (
                                     time.time() - last_ayah_change_time
                                     if last_ayah_change_time > 0
                                     else 999.0
                                 )
+                                elapsed_since_progress = (
+                                    time.time() - last_progress_time
+                                    if last_progress_time > 0
+                                    else elapsed_since_ayah_change
+                                )
+                                elapsed_for_jump = min(
+                                    elapsed_since_ayah_change,
+                                    elapsed_since_progress,
+                                )
                                 min_forward_elapsed = _minimum_forward_jump_elapsed_seconds(
                                     current_surah,
                                     current_ayah,
-                                    matched_ayah,
+                                    effective_matched_ayah,
+                                )
+                                forward_prompt_eligible = (
+                                    current_progress_coverage >= 0.90
+                                    and result.get("score", 0.0) >= 0.82
                                 )
                                 expected_surah, expected_ayah = _expected_prompt_position(
                                     current_surah,
@@ -2493,20 +2594,21 @@ async def websocket_recitation(websocket: WebSocket):
                                     current_progress_coverage,
                                     taraweeh_mode,
                                 )
-                                if skipped_ayahs > 8:
+                                if effective_skipped_ayahs > 8:
                                     print(
                                         "[Backend] Large forward relock accepted from "
                                         f"{current_surah}:{current_ayah} to "
-                                        f"{matched_surah}:{matched_ayah}; treating as "
+                                        f"{matched_surah}:{effective_matched_ayah}; treating as "
                                         "tracking recovery, not Luqmah."
                                     )
-                                elif elapsed_since_ayah_change < min_forward_elapsed:
+                                    forward_recovery_ayah = effective_matched_ayah
+                                elif elapsed_for_jump < min_forward_elapsed and forward_prompt_eligible:
                                     print(
                                         "[Backend] Confirmed fast forward jump from "
                                         f"{current_surah}:{current_ayah} to "
-                                        f"{matched_surah}:{matched_ayah}; prompting "
+                                        f"{matched_surah}:{effective_matched_ayah}; prompting "
                                         f"{expected_surah}:{expected_ayah} "
-                                        f"(elapsed={elapsed_since_ayah_change:.1f}s, "
+                                        f"(elapsed={elapsed_for_jump:.1f}s, "
                                         f"min={min_forward_elapsed:.1f}s)"
                                     )
                                     audit_luqmah(
@@ -2515,16 +2617,19 @@ async def websocket_recitation(websocket: WebSocket):
                                         expected_surah=expected_surah,
                                         expected_ayah=expected_ayah,
                                         detected_surah=matched_surah,
-                                        detected_ayah=matched_ayah,
+                                        detected_ayah=effective_matched_ayah,
                                         confidence=result.get("score", 0.0),
                                         result=result,
                                         details={
-                                            "skipped_ayahs": skipped_ayahs,
-                                            "forward_section_distance": forward_section_distance,
+                                            "skipped_ayahs": effective_skipped_ayahs,
+                                            "forward_section_distance": effective_forward_distance,
                                             "confirmations": pending_forward_count,
-                                            "required_confirmations": required_forward_confirmations,
+                                            "required_confirmations": effective_required_confirmations,
                                             "elapsed_since_ayah_change": _safe_float(elapsed_since_ayah_change, 3),
+                                            "elapsed_since_progress": _safe_float(elapsed_since_progress, 3),
+                                            "elapsed_for_jump": _safe_float(elapsed_for_jump, 3),
                                             "minimum_elapsed": _safe_float(min_forward_elapsed, 3),
+                                            "raw_detected_ayah": matched_ayah,
                                         },
                                     )
                                     await websocket.send_json({
@@ -2532,7 +2637,7 @@ async def websocket_recitation(websocket: WebSocket):
                                         "expected_surah": expected_surah,
                                         "expected_ayah": expected_ayah,
                                         "detected_surah": matched_surah,
-                                        "detected_ayah": matched_ayah,
+                                        "detected_ayah": effective_matched_ayah,
                                         "score": result.get("score", 0.0),
                                         "reason": "forward_jump",
                                     })
@@ -2542,13 +2647,31 @@ async def websocket_recitation(websocket: WebSocket):
                                     mistake_cooldown_until = time.time() + 3.0
                                     audio_buffer = np.zeros(0, dtype=np.float32)
                                     continue
+                                elif elapsed_for_jump < min_forward_elapsed:
+                                    pending_forward_surah = 0
+                                    pending_forward_ayah = 0
+                                    pending_forward_count = 0
+                                    failed_local_matches += 1
+                                    await websocket.send_json({
+                                        "type": "status",
+                                        "message": (
+                                            f"Forward match to Ayah {effective_matched_ayah} "
+                                            "held as low-confidence tracking noise."
+                                        ),
+                                        "tracking_mode": "FORWARD_JUMP_HELD",
+                                        "search_window": result.get("search_window", ""),
+                                        "fallback_count": failed_local_matches,
+                                        "metrics": result.get("metrics", {}),
+                                    })
+                                    continue
                                 print(
                                     "[Backend] Forward recovery accepted from "
                                     f"{current_surah}:{current_ayah} to "
-                                    f"{matched_surah}:{matched_ayah} "
-                                    f"(elapsed={elapsed_since_ayah_change:.1f}s, "
+                                    f"{matched_surah}:{effective_matched_ayah} "
+                                    f"(elapsed={elapsed_for_jump:.1f}s, "
                                     f"min={min_forward_elapsed:.1f}s)"
                                 )
+                                forward_recovery_ayah = effective_matched_ayah
                             pending_forward_surah = 0
                             pending_forward_ayah = 0
                             pending_forward_count = 0
@@ -2556,6 +2679,15 @@ async def websocket_recitation(websocket: WebSocket):
                             pending_forward_surah = 0
                             pending_forward_ayah = 0
                             pending_forward_count = 0
+
+                        if forward_recovery_ayah > matched_ayah:
+                            matched_ayah = forward_recovery_ayah
+                            recovered_verse = get_verse(matched_surah, matched_ayah) or {}
+                            matched_word_index = max(
+                                matched_word_index,
+                                len((recovered_verse.get("phonemes_joined", "") or "").split()),
+                            )
+                            next_coverage = max(next_coverage, 1.0)
                             
                         previous_surah = current_surah
                         previous_ayah = current_ayah
@@ -2701,7 +2833,8 @@ async def websocket_recitation(websocket: WebSocket):
                                 pending_tail_mismatch_key = tail_key
                                 pending_tail_mismatch_count = 1
 
-                            if pending_tail_mismatch_count >= 2:
+                            required_tail_confirmations = 1 if tail_mismatch.get("immediate") else 2
+                            if pending_tail_mismatch_count >= required_tail_confirmations:
                                 print(
                                     "[Backend] Same-ayah tail mismatch "
                                     f"{current_surah}:{current_ayah} word "
@@ -2732,6 +2865,8 @@ async def websocket_recitation(websocket: WebSocket):
                                         "strict_ratio": tail_mismatch["strict_ratio"],
                                         "skeleton_ratio": tail_mismatch["skeleton_ratio"],
                                         "confirmations": pending_tail_mismatch_count,
+                                        "required_confirmations": required_tail_confirmations,
+                                        "immediate": bool(tail_mismatch.get("immediate")),
                                     },
                                 )
                                 await websocket.send_json({

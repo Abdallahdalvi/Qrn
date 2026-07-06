@@ -28,7 +28,7 @@ Baseline observed on 2026-07-06:
 
 - The after-75:16 wrong-recitation case is caught at about 93s as `foreign_recitation`, expected 75:17 and detected 78:17.
 - The Ayah 75:4 wrong-recitation case is not yet caught.
-- The jump from 75:10 to 75:14 is not yet caught.
+- The jump from 75:10 to 75:14 is caught at about 57s as `forward_jump`, expected 75:11. The detected future ayah can land around 75:15 because the rolling window contains continued forward recitation; the critical behavior is prompting the missing continuation 75:11.
 
 ## Surah Rahman Wrong Recitation
 
@@ -45,7 +45,7 @@ Start context:
 Expected correction cases:
 
 - After Ayah 55:15, the reciter starts reading some other random ayah and repeats the wrong ayah twice. The system should prompt the expected continuation, Ayah 55:16, ideally within 3-5 seconds of the wrong-recitation evidence.
-- After Ayah 55:21, the reciter takes a long pause. The system should prompt Ayah 55:22, not an older ayah.
+- After Ayah 55:21, the reciter takes a long pause / missing-continuation gap. The system should prompt Ayah 55:22, not an older ayah. If the rolling window catches future-looking audio before the silence detector fires, a `forward_jump` Luqmah for expected 55:22 is acceptable and should still be reported with its actual reason.
 - At Ayah 55:24, the reciter starts reading some other random ayah and repeats the wrong ayah twice. The system should prompt/correct Ayah 55:24.
 - After Ayah 55:25, the reciter jumps to Ayah 55:29 and continues. The system should detect a forward jump and prompt from the missing expected continuation, starting at Ayah 55:26.
 

@@ -246,6 +246,25 @@ def _non_correction_status_line(check: dict[str, Any]) -> str:
     return f"{status} no-prompt: {check.get('label', 'expected no correction')} ({'; '.join(details)})"
 
 
+def _event_status_line(event: dict[str, Any]) -> str:
+    details = [
+        f"{event.get('t')}s",
+        str(event.get("reason", "")),
+        f"expected {event.get('expected_surah')}:{event.get('expected_ayah')}",
+        f"detected {event.get('detected_surah')}:{event.get('detected_ayah')}",
+        f"confidence {float(event.get('score', 0.0) or 0.0):.3f}",
+    ]
+    if event.get("expected_word") or event.get("heard_word"):
+        details.append(
+            f"word {event.get('expected_word', '')}->{event.get('heard_word', '')}"
+        )
+    if event.get("elapsed_for_jump") is not None:
+        details.append(
+            f"elapsed {event.get('elapsed_for_jump')}s/min {event.get('minimum_elapsed')}s"
+        )
+    return "- " + "; ".join(details)
+
+
 def _build_regression_report(results: list[dict[str, Any]], label: str) -> str:
     correct = [result for result in results if result.get("expect_no_mistake")]
     wrong = [result for result in results if not result.get("expect_no_mistake")]
@@ -276,6 +295,10 @@ def _build_regression_report(results: list[dict[str, Any]], label: str) -> str:
             status = "PASS" if false_luqmah == 0 else "FAIL"
             lines.append(f"{status} {_report_group_name(result)}")
             lines.append(f"{false_luqmah} false Luqmah")
+            if false_luqmah:
+                lines.append("Actual Luqmah Events:")
+                for event in result.get("correction_events", []):
+                    lines.append(_event_status_line(event))
             lines.append("")
     else:
         lines.append("No correct-recitation files configured.")
@@ -300,6 +323,13 @@ def _build_regression_report(results: list[dict[str, Any]], label: str) -> str:
                     lines.append(_non_correction_status_line(check))
                 clean = sum(1 for check in no_prompt if check.get("matched"))
                 lines.append(f"No-prompt guards: {clean}/{len(no_prompt)} ({_format_pct(clean, len(no_prompt))})")
+            events = result.get("correction_events", [])
+            if events:
+                lines.append("Actual Luqmah Events:")
+                for event in events:
+                    lines.append(_event_status_line(event))
+            else:
+                lines.append("Actual Luqmah Events: none")
             lines.append("")
             lines.append("--------------------")
             lines.append("")
@@ -353,6 +383,7 @@ def _run_case(backend, case: dict[str, Any], manifest_path: Path | None) -> dict
 
     events: list[dict[str, Any]] = []
     verse_hits: list[dict[str, Any]] = []
+    state_trace: list[dict[str, Any]] = []
     latencies: list[float] = []
     wall_start = time.perf_counter()
 
@@ -389,6 +420,20 @@ def _run_case(backend, case: dict[str, Any], manifest_path: Path | None) -> dict
         metrics = result.get("metrics", {}) or {}
         if metrics.get("total_latency"):
             latencies.append(float(metrics["total_latency"]))
+        state_trace.append({
+            "t": round(now_t, 3),
+            "state_surah": current_surah,
+            "state_ayah": current_ayah,
+            "state_progress": round(float(current_progress or 0.0), 4),
+            "matched_surah": int(result.get("surah", 0) or 0),
+            "matched_ayah": int(result.get("ayah", 0) or 0),
+            "matched_score": round(float(result.get("score", 0.0) or 0.0), 4),
+            "tracking_mode": result.get("tracking_mode", ""),
+            "mistake_candidate": bool(result.get("mistake_candidate")),
+            "mistake_reason": result.get("mistake_reason", ""),
+            "mistake_surah": int(result.get("mistake_surah", 0) or 0),
+            "mistake_ayah": int(result.get("mistake_ayah", 0) or 0),
+        })
 
         if result.get("surah", 0) > 0:
             matched_surah = int(result["surah"])
@@ -490,6 +535,7 @@ def _run_case(backend, case: dict[str, Any], manifest_path: Path | None) -> dict
                 failed_matches += 1
                 continue
 
+            forward_recovery_ayah = 0
             if (
                 taraweeh
                 and current_surah > 0
@@ -498,11 +544,37 @@ def _run_case(backend, case: dict[str, Any], manifest_path: Path | None) -> dict
                 and required_forward > 0
                 and assisted_ayah == 0
             ):
-                if pending_forward["surah"] == matched_surah and pending_forward["ayah"] == matched_ayah:
+                same_forward_region = (
+                    pending_forward["surah"] == matched_surah
+                    and pending_forward["ayah"] > current_ayah
+                    and abs(matched_ayah - pending_forward["ayah"]) <= 3
+                )
+                if same_forward_region:
                     pending_forward["count"] += 1
+                    pending_forward["ayah"] = max(pending_forward["ayah"], matched_ayah)
                 else:
                     pending_forward = {"surah": matched_surah, "ayah": matched_ayah, "count": 1}
-                if pending_forward["count"] >= required_forward and skipped > 0 and now_t >= mistake_cooldown_until:
+                effective_matched_ayah = max(matched_ayah, pending_forward["ayah"])
+                effective_skipped = max(0, effective_matched_ayah - current_ayah - 1)
+                effective_forward_distance = backend._forward_section_distance(
+                    current_surah,
+                    current_ayah,
+                    current_progress,
+                    effective_matched_ayah,
+                    int(result.get("section_index", 0) or 0)
+                    if effective_matched_ayah == matched_ayah
+                    else 1,
+                )
+                effective_required = min(
+                    required_forward,
+                    backend._required_forward_jump_confirmations(
+                        effective_skipped,
+                        effective_forward_distance,
+                        current_progress,
+                        float(result.get("score", 0.0) or 0.0),
+                    ),
+                )
+                if pending_forward["count"] >= effective_required and effective_skipped > 0 and now_t >= mistake_cooldown_until:
                     expected = backend._expected_prompt_position(
                         current_surah,
                         current_ayah,
@@ -514,35 +586,64 @@ def _run_case(backend, case: dict[str, Any], manifest_path: Path | None) -> dict
                         if last_ayah_change_t > 0
                         else 999.0
                     )
+                    elapsed_since_progress = (
+                        now_t - last_progress_t
+                        if last_progress_t > 0
+                        else elapsed_since_ayah_change
+                    )
+                    elapsed_for_jump = min(elapsed_since_ayah_change, elapsed_since_progress)
                     min_forward_elapsed = backend._minimum_forward_jump_elapsed_seconds(
                         current_surah,
                         current_ayah,
-                        matched_ayah,
+                        effective_matched_ayah,
                     )
-                    if skipped > 8:
+                    forward_prompt_eligible = (
+                        current_progress >= 0.90
+                        and float(result.get("score", 0.0) or 0.0) >= 0.82
+                    )
+                    if effective_skipped > 8:
+                        forward_recovery_ayah = effective_matched_ayah
                         pending_forward = {"surah": 0, "ayah": 0, "count": 0}
-                    elif elapsed_since_ayah_change < min_forward_elapsed:
+                    elif elapsed_for_jump < min_forward_elapsed and forward_prompt_eligible:
                         add_event(
                             now_t,
                             "forward_jump",
                             expected,
-                            (matched_surah, matched_ayah),
+                            (matched_surah, effective_matched_ayah),
                             float(result.get("score", 0.0) or 0.0),
                             {
                                 "confirmations": pending_forward["count"],
-                                "required_confirmations": required_forward,
+                                "required_confirmations": effective_required,
                                 "elapsed_since_ayah_change": round(elapsed_since_ayah_change, 3),
+                                "elapsed_since_progress": round(elapsed_since_progress, 3),
+                                "elapsed_for_jump": round(elapsed_for_jump, 3),
                                 "minimum_elapsed": round(min_forward_elapsed, 3),
+                                "raw_detected_ayah": matched_ayah,
                             },
                         )
                         mistake_cooldown_until = now_t + 3.0
                         pending_forward = {"surah": 0, "ayah": 0, "count": 0}
                         failed_matches = 0
                         continue
+                    elif elapsed_for_jump < min_forward_elapsed:
+                        pending_forward = {"surah": 0, "ayah": 0, "count": 0}
+                        failed_matches += 1
+                        continue
+                    else:
+                        forward_recovery_ayah = effective_matched_ayah
                     pending_forward = {"surah": 0, "ayah": 0, "count": 0}
                 else:
                     continue
             pending_forward = {"surah": 0, "ayah": 0, "count": 0}
+
+            if forward_recovery_ayah > matched_ayah:
+                matched_ayah = forward_recovery_ayah
+                recovered_verse = backend.get_verse(matched_surah, matched_ayah) or {}
+                matched_word_index = max(
+                    matched_word_index,
+                    len((recovered_verse.get("phonemes_joined", "") or "").split()),
+                )
+                next_progress = max(next_progress, 1.0)
 
             previous_surah = current_surah
             previous_ayah = current_ayah
@@ -580,7 +681,8 @@ def _run_case(backend, case: dict[str, Any], manifest_path: Path | None) -> dict
                 else:
                     pending_tail_key = tail_key
                     pending_tail_count = 1
-                if pending_tail_count >= 2:
+                required_tail = 1 if tail.get("immediate") else 2
+                if pending_tail_count >= required_tail:
                     add_event(
                         now_t,
                         "same_ayah_tail_mismatch",
@@ -591,6 +693,8 @@ def _run_case(backend, case: dict[str, Any], manifest_path: Path | None) -> dict
                             "word_index": tail["word_index"],
                             "expected_word": tail["expected"],
                             "heard_word": tail["got"],
+                            "required_confirmations": required_tail,
+                            "immediate": bool(tail.get("immediate")),
                         },
                     )
                     mistake_cooldown_until = now_t + 3.0
@@ -715,6 +819,7 @@ def _run_case(backend, case: dict[str, Any], manifest_path: Path | None) -> dict
         "expected_corrections": expected_checks,
         "expected_non_corrections": no_prompt_checks,
         "verse_hits": verse_hits,
+        "state_trace": state_trace,
         "summary": {
             "windows": max(0, (len(audio) - start) // stride + 1),
             "verse_hits": len(verse_hits),

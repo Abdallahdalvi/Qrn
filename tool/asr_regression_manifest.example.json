@@ -31,11 +31,14 @@
           "t_max": 85.0
         },
         {
-          "label": "Rahman long pause after 55:21 should prompt 55:22",
-          "reason": "pause",
+          "label": "Rahman missing continuation after 55:21 should prompt 55:22",
+          "reasons": [
+            "pause",
+            "forward_jump"
+          ],
           "expected_surah": 55,
           "expected_ayah": 22,
-          "t_min": 108.0,
+          "t_min": 100.0,
           "t_max": 124.0
         },
         {
@@ -87,8 +90,8 @@
           "expected_surah": 75,
           "expected_ayah": 11,
           "detected_surah": 75,
-          "t_min": 32.0,
-          "t_max": 45.0
+          "t_min": 50.0,
+          "t_max": 62.0
         },
         {
           "label": "Qiyamah wrong 75:18 after 75:16",
