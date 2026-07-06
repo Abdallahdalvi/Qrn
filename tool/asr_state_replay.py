@@ -199,6 +199,35 @@ def _validate_expected_non_corrections(
     return failures, checks
 
 
+def _find_unexpected_corrections(
+    events: list[dict[str, Any]],
+    expected_checks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    matched_event_ids = {
+        id(check["event"])
+        for check in expected_checks
+        if check.get("event") is not None
+    }
+    matched_targets = {
+        (
+            int((check.get("expected") or {}).get("expected_surah", 0) or 0),
+            int((check.get("expected") or {}).get("expected_ayah", 0) or 0),
+        )
+        for check in expected_checks
+        if check.get("matched")
+    }
+    return [
+        event
+        for event in events
+        if id(event) not in matched_event_ids
+        and (
+            int(event.get("expected_surah", 0) or 0),
+            int(event.get("expected_ayah", 0) or 0),
+        )
+        not in matched_targets
+    ]
+
+
 def _format_pct(numerator: int, denominator: int) -> str:
     if denominator <= 0:
         return "n/a"
@@ -330,6 +359,13 @@ def _build_regression_report(results: list[dict[str, Any]], label: str) -> str:
                     lines.append(_event_status_line(event))
             else:
                 lines.append("Actual Luqmah Events: none")
+            unexpected = result.get("unexpected_corrections", [])
+            if unexpected:
+                lines.append("Unexpected Luqmah Events:")
+                for event in unexpected:
+                    lines.append(_event_status_line(event))
+            else:
+                lines.append("Unexpected Luqmah Events: none")
             lines.append("")
             lines.append("--------------------")
             lines.append("")
@@ -366,6 +402,12 @@ def _run_case(backend, case: dict[str, Any], manifest_path: Path | None) -> dict
     assisted_surah = int(case.get("assisted_surah", 0) or 0)
     assisted_ayah = int(case.get("assisted_ayah", 0) or 0)
     post_recovery_lock = bool(case.get("post_recovery_lock", False))
+    simulate_client_prompts = bool(case.get("simulate_client_prompts", True))
+    simulate_client_pause = bool(case.get("simulate_client_pause", True))
+    client_prompt_mute_sec = max(0.0, float(case.get("client_prompt_mute_sec", 4.0)))
+    client_audio_muted_until = 0.0
+    client_recovery_surah = 0
+    client_recovery_ayah = 0
 
     current_progress = 0.0
     current_word_index = 0
@@ -387,7 +429,7 @@ def _run_case(backend, case: dict[str, Any], manifest_path: Path | None) -> dict
     latencies: list[float] = []
     wall_start = time.perf_counter()
 
-    def add_event(now_t: float, reason: str, expected: tuple[int, int], detected: tuple[int, int], score: float, extra: dict[str, Any] | None = None):
+    def add_event(now_t: float, reason: str, expected: tuple[int, int], detected: tuple[int, int], score: float, extra: dict[str, Any] | None = None) -> dict[str, Any]:
         event = {
             "t": round(now_t, 3),
             "reason": reason,
@@ -403,9 +445,57 @@ def _run_case(backend, case: dict[str, Any], manifest_path: Path | None) -> dict
         if extra:
             event.update(extra)
         events.append(event)
+        return event
+
+    def simulate_client_prompt(event: dict[str, Any], now_t: float) -> None:
+        nonlocal assisted_surah, assisted_ayah, post_recovery_lock
+        nonlocal pending_forward, pending_mistake_key, pending_mistake_count
+        nonlocal pending_tail_key, pending_tail_count, client_audio_muted_until
+        nonlocal client_recovery_surah, client_recovery_ayah
+
+        if not simulate_client_prompts or not taraweeh:
+            return
+        if event.get("reason") == "no_context_progress":
+            return
+        if int(event.get("expected_surah", 0) or 0) <= 0 or int(event.get("expected_ayah", 0) or 0) <= 0:
+            return
+        if int(event.get("detected_surah", 0) or 0) <= 0 or int(event.get("detected_ayah", 0) or 0) <= 0:
+            return
+        if float(event.get("score", 0.0) or 0.0) <= 0.0:
+            return
+
+        # The Flutter client sends discard_audio + assisted_prompt after a
+        # confident mistake, so replay should pin the same recovery target.
+        assisted_surah = int(event["expected_surah"])
+        assisted_ayah = int(event["expected_ayah"])
+        client_recovery_surah = assisted_surah
+        client_recovery_ayah = assisted_ayah
+        post_recovery_lock = False
+        pending_forward = {"surah": 0, "ayah": 0, "count": 0}
+        pending_mistake_key = None
+        pending_mistake_count = 0
+        pending_tail_key = None
+        pending_tail_count = 0
+        client_audio_muted_until = max(client_audio_muted_until, now_t + client_prompt_mute_sec)
 
     for end in range(start, len(audio) + 1, stride):
         now_t = end / SAMPLE_RATE
+        if now_t < client_audio_muted_until:
+            state_trace.append({
+                "t": round(now_t, 3),
+                "state_surah": current_surah,
+                "state_ayah": current_ayah,
+                "state_progress": round(float(current_progress or 0.0), 4),
+                "matched_surah": 0,
+                "matched_ayah": 0,
+                "matched_score": 0.0,
+                "tracking_mode": "CLIENT_PROMPT_MUTE",
+                "mistake_candidate": False,
+                "mistake_reason": "",
+                "mistake_surah": 0,
+                "mistake_ayah": 0,
+            })
+            continue
         chunk = audio[max(0, end - window):end].copy()
         result = backend.predict_audio(
             chunk,
@@ -605,7 +695,7 @@ def _run_case(backend, case: dict[str, Any], manifest_path: Path | None) -> dict
                         forward_recovery_ayah = effective_matched_ayah
                         pending_forward = {"surah": 0, "ayah": 0, "count": 0}
                     elif elapsed_for_jump < min_forward_elapsed and forward_prompt_eligible:
-                        add_event(
+                        event = add_event(
                             now_t,
                             "forward_jump",
                             expected,
@@ -621,6 +711,7 @@ def _run_case(backend, case: dict[str, Any], manifest_path: Path | None) -> dict
                                 "raw_detected_ayah": matched_ayah,
                             },
                         )
+                        simulate_client_prompt(event, now_t)
                         mistake_cooldown_until = now_t + 3.0
                         pending_forward = {"surah": 0, "ayah": 0, "count": 0}
                         failed_matches = 0
@@ -666,6 +757,21 @@ def _run_case(backend, case: dict[str, Any], manifest_path: Path | None) -> dict
                 or current_progress > previous_progress + backend._PROGRESS_STALE_DELTA
             ):
                 last_progress_t = now_t
+            if assisted_ayah > 0 and current_surah == assisted_surah and current_ayah == assisted_ayah:
+                assisted_surah = 0
+                assisted_ayah = 0
+                post_recovery_lock = True
+            elif post_recovery_lock:
+                post_recovery_lock = False
+            if (
+                client_recovery_ayah > 0
+                and (
+                    current_surah != client_recovery_surah
+                    or current_ayah > client_recovery_ayah
+                )
+            ):
+                client_recovery_surah = 0
+                client_recovery_ayah = 0
             failed_matches = 0
 
             tail = backend._same_ayah_tail_mismatch(result)
@@ -683,7 +789,7 @@ def _run_case(backend, case: dict[str, Any], manifest_path: Path | None) -> dict
                     pending_tail_count = 1
                 required_tail = 1 if tail.get("immediate") else 2
                 if pending_tail_count >= required_tail:
-                    add_event(
+                    event = add_event(
                         now_t,
                         "same_ayah_tail_mismatch",
                         (current_surah, current_ayah),
@@ -697,6 +803,7 @@ def _run_case(backend, case: dict[str, Any], manifest_path: Path | None) -> dict
                             "immediate": bool(tail.get("immediate")),
                         },
                     )
+                    simulate_client_prompt(event, now_t)
                     mistake_cooldown_until = now_t + 3.0
                     pending_tail_key = None
                     pending_tail_count = 0
@@ -737,7 +844,7 @@ def _run_case(backend, case: dict[str, Any], manifest_path: Path | None) -> dict
                 pending_mistake_key = mistake_key
                 pending_mistake_count = 1
             if pending_mistake_count >= required:
-                add_event(
+                event = add_event(
                     now_t,
                     mistake_reason,
                     expected,
@@ -745,18 +852,25 @@ def _run_case(backend, case: dict[str, Any], manifest_path: Path | None) -> dict
                     float(result.get("mistake_score", 0.0) or 0.0),
                     {"confirmations": pending_mistake_count, "required_confirmations": required},
                 )
+                simulate_client_prompt(event, now_t)
                 mistake_cooldown_until = now_t + 3.0
                 pending_mistake_key = None
                 pending_mistake_count = 0
             continue
 
-        if result.get("speech_detected", True) and current_surah > 0:
+        if current_surah > 0 and (
+            result.get("speech_detected", True) or simulate_client_pause
+        ):
             failed_matches += 1
             required_failures, stall_seconds = backend._stall_detection_thresholds(
                 current_surah,
                 current_ayah,
                 current_progress,
                 taraweeh,
+            )
+            recovery_prompt_owned = (
+                client_recovery_surah == current_surah
+                and client_recovery_ayah == current_ayah
             )
             if (
                 taraweeh
@@ -766,6 +880,7 @@ def _run_case(backend, case: dict[str, Any], manifest_path: Path | None) -> dict
                 and has_committed_match
                 and now_t >= mistake_cooldown_until
                 and not backend._at_surah_end(current_surah, current_ayah)
+                and not recovery_prompt_owned
             ):
                 expected = backend._expected_prompt_position(
                     current_surah,
@@ -775,7 +890,7 @@ def _run_case(backend, case: dict[str, Any], manifest_path: Path | None) -> dict
                 )
                 add_event(
                     now_t,
-                    "no_context_progress",
+                    "no_context_progress" if result.get("speech_detected", True) else "pause",
                     expected,
                     (0, 0),
                     0.0,
@@ -794,6 +909,14 @@ def _run_case(backend, case: dict[str, Any], manifest_path: Path | None) -> dict
         failures.append(f"Only {len(events)} correction(s), expected at least {expected_mistake_min}")
     expected_failures, expected_checks = _validate_expected_corrections(events, case)
     failures.extend(expected_failures)
+    unexpected_corrections = _find_unexpected_corrections(events, expected_checks)
+    if case.get("fail_on_unexpected_corrections", False) and unexpected_corrections:
+        first = unexpected_corrections[0]
+        failures.append(
+            "Unexpected correction "
+            f"{first['reason']} at {first['t']}s "
+            f"expected {first['expected_surah']}:{first['expected_ayah']}"
+        )
     no_prompt_failures, no_prompt_checks = _validate_expected_non_corrections(events, case)
     failures.extend(no_prompt_failures)
     expected_final_surah = int(case.get("expected_final_surah", 0) or 0)
@@ -817,6 +940,7 @@ def _run_case(backend, case: dict[str, Any], manifest_path: Path | None) -> dict
         "final_ayah": current_ayah,
         "correction_events": events,
         "expected_corrections": expected_checks,
+        "unexpected_corrections": unexpected_corrections,
         "expected_non_corrections": no_prompt_checks,
         "verse_hits": verse_hits,
         "state_trace": state_trace,

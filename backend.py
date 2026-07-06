@@ -520,6 +520,8 @@ def _stall_detection_thresholds(
 
     if progress_coverage >= 0.65:
         stall_seconds += 0.75
+    if progress_coverage >= 0.90:
+        required_failures = 3
 
     return required_failures, stall_seconds
 

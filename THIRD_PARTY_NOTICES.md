@@ -1,52 +1,77 @@
-# Third-Party Notices and Open Source Acknowledgements
+# Third-Party Notices and Commercial Release Checklist
 
-This application utilizes components, datasets, and models from several open-source projects. We gratefully acknowledge the contributions of the open-source community.
+This file tracks datasets, audio sources, models, APIs, and code that may affect
+commercial distribution of this Quran recitation companion. It is an engineering
+checklist, not legal advice. Before selling hardware or bundled software, verify
+each item with counsel and, where needed, direct permission from rights holders.
 
-## 1. TarteelAI Quranic Universal Library (QUL)
-* **Author:** TarteelAI
-* **Repository:** [https://github.com/TarteelAI/quranic-universal-library](https://github.com/TarteelAI/quranic-universal-library)
-* **License:** MIT / CC BY-SA (Data)
-* **Components Used:**
-  - Quranic metadata (Surah names, Ayah counts)
-  - Arabic Uthmani text datasets
-  - Phoneme-to-Arabic alignment rules (Planned integration for next ayah helpers)
+## Quranic Universal Ayahs
 
-## 2. Offline Tarteel (Verse Recognition Engine)
-* **Author:** yazinsai
-* **Repository:** [https://github.com/yazinsai/offline-tarteel](https://github.com/yazinsai/offline-tarteel)
-* **License:** MIT License
-* **Components Used:**
-  - `fastconformer_phoneme_q8.onnx` (Quantized Acoustic Model)
-  - `quran_phonemes.json` (Target Phoneme Dictionary)
-  - Mel-spectrogram feature extraction logic (adapted for backend pipeline)
-  - Greedy phoneme decoding pipeline
+- Source: https://huggingface.co/datasets/hetchyy/quranic-universal-ayahs
+- Current project status: candidate dataset for evaluation, timing features, and future training; not bundled in the app at this checkpoint.
+- Hugging Face listed license: `cc-by-4.0`.
+- Useful fields observed: ayah audio, `duration_ms`, `text_uthmani`, waqf-aware `segments`, `word_timestamps`, `letter_timestamps`, `source_url`, and `source_offset_ms`.
+- Commercial note: CC BY 4.0 generally allows commercial use with attribution, but this dataset includes recitation audio derived from upstream URLs. Do not redistribute or preinstall the audio on commercial hardware until the upstream audio rights are verified independently.
+- Required attribution if used: name the dataset, author/account, source URL, license, and describe any modifications or derived artifacts.
 
-## 3. Tarteel Whisper Quran Models
-* **Author:** TarteelAI
-* **Repository/Registry:** [https://huggingface.co/tarteel-ai](https://huggingface.co/tarteel-ai)
-* **License:** Apache 2.0 / MIT
-* **Components Used:**
-  - Underlying acoustic research and dataset foundations that inspired the FastConformer quantization.
+## TarteelAI Quranic Universal Library (QUL)
 
-## 4. Quranic Verse Recognition Tool
-* **Author:** Abdelrahman47-code
-* **Repository:** [https://github.com/Abdelrahman47-code/Quranic-Verse-Recognition](https://github.com/Abdelrahman47-code/Quranic-Verse-Recognition)
-* **License:** MIT License
-* **Components Used:**
-  - Reference for Levenshtein-based transcript-to-verse confidence scoring metrics.
+- Source: https://github.com/TarteelAI/quranic-universal-library
+- Current project status: historical/planned source for Quran metadata, ayah text, and word/alignment data.
+- Previously recorded license status: MIT for code and CC BY-SA-style terms for data. Reverify exact current license files before commercial release.
+- Commercial note: if QUL data is bundled or used to generate derivative assets, keep attribution and any share-alike obligations visible in release docs.
 
----
+## Offline Tarteel / Tilawa Recognition Work
 
-## Integration Recommendations
+- Source: https://github.com/yazinsai/offline-tarteel and successor/reference work https://github.com/yazinsai/tilawa
+- Current project status: architecture/model provenance reference for FastConformer-style ONNX Quran recognition and regression discipline.
+- Previously recorded license status: MIT. Reverify exact license and model asset provenance before commercial release.
+- Commercial note: if `fastconformer_phoneme_q8.onnx` or `quran_phonemes.json` came from this lineage, keep the exact repository, commit, model checkpoint, export script, and quantization method in the release artifact.
 
-**What can be directly reused:**
-- **Datasets:** The QUL JSON/SQL exports should be used as the absolute source of truth for Surah names, Ayah text, and translation mappings.
-- **Acoustic Models:** The ONNX quantized models (`fastconformer_phoneme_q8.onnx`) from `offline-tarteel` are perfectly suited for edge-device or local server inference and should be retained.
-- **Word Alignment:** QUL's word-by-word timestamp data can be integrated with our phoneme tracker to offer precise word-highlighting.
+## TarteelAI Quran Models
 
-**What should be rewritten/adapted:**
-- **State Machine & Tracking:** Most open-source tools perform stateless global searches. Our "Taraweeh Mode", "Controlled Rewind", and "Pause Detection" state machines must be custom-written to fit the strict live-recitation requirements of Huffaz.
-- **WebSocket Streaming:** The bridging between Flutter Audio Capture and Python ONNX Runtime via WebSockets is highly specific to our architecture and cannot be copy-pasted from existing repos.
+- Source: https://huggingface.co/tarteel-ai
+- Current project status: research/model family reference.
+- Commercial note: do not assume all TarteelAI-hosted models share one license. Verify each model card, dataset card, and checkpoint before training or distribution.
 
-**License Implications:**
-All identified dependencies are available under highly permissive licenses (MIT, Apache 2.0, or CC). This permits commercial and private use, provided we maintain this `THIRD_PARTY_NOTICES.md` file and display an Acknowledgements page within the Flutter app settings.
+## Quranic Verse Recognition References
+
+- Source: https://github.com/Abdelrahman47-code/Quranic-Verse-Recognition
+- Current project status: reference for Levenshtein/transcript-to-verse confidence scoring ideas.
+- Previously recorded license status: MIT. Reverify before copying or adapting code.
+
+## EveryAyah Prompt Audio
+
+- Source pattern used in app: `https://everyayah.com/data/<reciter>/<surah><ayah>.mp3`.
+- Current project status: used at runtime for Luqmah prompt playback in `lib/ui/live_recitation_screen.dart`.
+- Commercial note: treat this as an external recitation-audio dependency requiring permission/terms verification before commercial use, offline bundling, or redistribution.
+- Release action: either obtain written permission, replace with a clearly licensed recitation corpus, or ship without bundled audio and require user-provided audio sources.
+
+## Quran.com / QDC Audio and API
+
+- Source pattern observed: `https://download.quranicaudio.com/qdc/...` in mock assets and Quran API usage in `lib/api/quran_api.dart`.
+- Current project status: playback/highlighting support and mock data.
+- Commercial note: verify API terms, rate limits, attribution rules, and audio redistribution rights before using in a paid product or hardware device.
+
+## Current ASR Model and Quran Phoneme Data
+
+- Model file: `assets/web/fastconformer_phoneme_q8.onnx`.
+- Current project status: primary recognition model.
+- Commercial note: original checkpoint, dataset, export chain, and model license must be identified before commercial release.
+- Quran phoneme data: `assets/web/quran_phonemes.json` and `assets/models/quran_phonemes.json`.
+- Commercial note: confirm source and license for Quran text normalization, transliteration/phoneme conversion, and any generated derivative data.
+
+## Open-Source Code Dependencies
+
+- Backend includes Python packages such as FastAPI, ONNX Runtime, NumPy, librosa, RapidFuzz/Levenshtein-related libraries, and Uvicorn.
+- Flutter app includes Dart/Flutter packages and Android build dependencies.
+- Web engine includes ONNX Runtime Web and JavaScript tooling.
+- Release action: generate a full dependency license report for Python, Flutter/Gradle, and npm before public distribution.
+
+## Commercial Release Rules
+
+- Do not bundle third-party recitation audio until the specific reciter/source license permits commercial redistribution.
+- Keep attribution visible in app settings/about screen and printed/device documentation when required.
+- Keep a machine-readable copy of third-party notices in every shipped build.
+- Track model provenance for every ONNX or quantized model, including original repository, checkpoint, license, training data, export script, and quantization method.
+- Treat research-only/non-commercial models or datasets as evaluation-only unless written permission is obtained.
