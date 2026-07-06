@@ -20,7 +20,37 @@
       "expect_no_mistake": false,
       "expected_final_surah": 55,
       "expected_final_ayah_min": 20,
-      "expected_final_ayah_max": 27
+      "expected_final_ayah_max": 27,
+      "expected_corrections": [
+        {
+          "label": "wrong ending in Rahman 55:24",
+          "reason": "tail_mismatch",
+          "expected_surah": 55,
+          "expected_ayah": 24,
+          "t_min": 130.0,
+          "t_max": 150.0
+        }
+      ]
+    },
+    {
+      "name": "qiyamah_manual_foreign_surah",
+      "audio": "regression_audio/qiyamah_manual_foreign_surah.wav",
+      "start_surah": 75,
+      "start_ayah": 1,
+      "taraweeh": true,
+      "expect_no_mistake": false,
+      "expected_final_surah": 75,
+      "expected_final_ayah_min": 1,
+      "expected_final_ayah_max": 40,
+      "expected_corrections": [
+        {
+          "label": "foreign surah recited while locked to Qiyamah",
+          "reason": "foreign_surah",
+          "expected_surah": 75,
+          "t_min": 85.0,
+          "t_max": 100.0
+        }
+      ]
     }
   ]
 }

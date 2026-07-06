@@ -101,6 +101,161 @@ def _expected_from_candidate(
         prefer_current=prefer_current,
     )
 
+_REASON_ALIASES = {
+    "pause": {"pause", "stall", "no_context_progress"},
+    "tail_mismatch": {"tail_mismatch", "same_ayah_tail_mismatch"},
+    "foreign_surah": {"foreign_surah", "foreign_recitation"},
+    "low_confidence": {"low_confidence", "word_correction"},
+}
+
+
+def _reason_matches(actual: str, expected: str) -> bool:
+    actual_norm = (actual or "").strip()
+    expected_norm = (expected or "").strip()
+    if not expected_norm:
+        return True
+    if actual_norm == expected_norm:
+        return True
+    aliases = _REASON_ALIASES.get(expected_norm, {expected_norm})
+    return actual_norm in aliases
+
+
+def _event_matches_expected(event: dict[str, Any], expected: dict[str, Any]) -> bool:
+    reason = expected.get("reason", "")
+    reasons = expected.get("reasons")
+    if reasons:
+        if not any(_reason_matches(event.get("reason", ""), str(item)) for item in reasons):
+            return False
+    elif reason and not _reason_matches(event.get("reason", ""), str(reason)):
+        return False
+
+    t_min = expected.get("t_min")
+    t_max = expected.get("t_max")
+    if t_min is not None and float(event.get("t", 0.0)) < float(t_min):
+        return False
+    if t_max is not None and float(event.get("t", 0.0)) > float(t_max):
+        return False
+
+    for field in ("expected_surah", "expected_ayah", "detected_surah", "detected_ayah"):
+        if expected.get(field) is not None and int(event.get(field, 0) or 0) != int(expected[field]):
+            return False
+
+    min_score = expected.get("min_score")
+    if min_score is not None and float(event.get("score", 0.0) or 0.0) < float(min_score):
+        return False
+
+    return True
+
+
+def _validate_expected_corrections(
+    events: list[dict[str, Any]],
+    case: dict[str, Any],
+) -> tuple[list[str], list[dict[str, Any]]]:
+    failures: list[str] = []
+    checks: list[dict[str, Any]] = []
+    for index, expected in enumerate(case.get("expected_corrections", []) or [], start=1):
+        label = expected.get("label") or expected.get("reason") or f"expected correction {index}"
+        matches = [event for event in events if _event_matches_expected(event, expected)]
+        matched = matches[0] if matches else None
+        checks.append({
+            "label": label,
+            "matched": matched is not None,
+            "expected": expected,
+            "event": matched,
+        })
+        if matched is None:
+            failures.append(f"Missing expected correction: {label}")
+    return failures, checks
+
+
+def _format_pct(numerator: int, denominator: int) -> str:
+    if denominator <= 0:
+        return "n/a"
+    return f"{(numerator / denominator) * 100:.1f}%"
+
+
+def _report_group_name(result: dict[str, Any]) -> str:
+    raw = str(result.get("name") or "")
+    if raw:
+        return raw.replace("_local", "").replace("_", " ").title()
+    return Path(str(result.get("audio") or "")).stem
+
+
+def _expected_status_line(check: dict[str, Any]) -> str:
+    status = "PASS" if check.get("matched") else "FAIL"
+    expected = check.get("expected", {}) or {}
+    event = check.get("event") or {}
+    details: list[str] = []
+    if expected.get("reason"):
+        details.append(str(expected["reason"]))
+    if expected.get("expected_surah") and expected.get("expected_ayah"):
+        details.append(f"expected {expected['expected_surah']}:{expected['expected_ayah']}")
+    if event:
+        details.append(
+            f"caught at {event.get('t')}s as {event.get('reason')} "
+            f"detected {event.get('detected_surah')}:{event.get('detected_ayah')}"
+        )
+    return f"{status} {check.get('label', 'expected correction')} ({'; '.join(details)})"
+
+
+def _build_regression_report(results: list[dict[str, Any]], label: str) -> str:
+    correct = [result for result in results if result.get("expect_no_mistake")]
+    wrong = [result for result in results if not result.get("expect_no_mistake")]
+
+    correct_passed = sum(1 for result in correct if not result.get("correction_events"))
+    expected_checks = [
+        check
+        for result in wrong
+        for check in result.get("expected_corrections", [])
+    ]
+    expected_passed = sum(1 for check in expected_checks if check.get("matched"))
+
+    lines: list[str] = [
+        label,
+        "",
+        "Correct Files",
+        "",
+    ]
+    if correct:
+        for result in correct:
+            false_luqmah = len(result.get("correction_events", []))
+            status = "PASS" if false_luqmah == 0 else "FAIL"
+            lines.append(f"{status} {_report_group_name(result)}")
+            lines.append(f"{false_luqmah} false Luqmah")
+            lines.append("")
+    else:
+        lines.append("No correct-recitation files configured.")
+        lines.append("")
+
+    lines.extend(["Wrong Files", ""])
+    if wrong:
+        for result in wrong:
+            checks = result.get("expected_corrections", [])
+            lines.append(_report_group_name(result))
+            if checks:
+                for check in checks:
+                    lines.append(_expected_status_line(check))
+                matched = sum(1 for check in checks if check.get("matched"))
+                lines.append(f"Accuracy: {matched}/{len(checks)} ({_format_pct(matched, len(checks))})")
+            else:
+                corrections = len(result.get("correction_events", []))
+                lines.append(f"No individual expected corrections configured; observed {corrections} correction(s).")
+            lines.append("")
+            lines.append("--------------------")
+            lines.append("")
+    else:
+        lines.append("No wrong-recitation files configured.")
+        lines.append("")
+
+    lines.extend([
+        "Overall",
+        "",
+        f"Correct: {correct_passed}/{len(correct)} ({_format_pct(correct_passed, len(correct))})",
+        f"Wrong: {expected_passed}/{len(expected_checks)} ({_format_pct(expected_passed, len(expected_checks))})",
+        f"Overall Detection: {_format_pct(correct_passed + expected_passed, len(correct) + len(expected_checks))}",
+    ])
+    return "\n".join(lines).rstrip() + "\n"
+
 
 def _run_case(backend, case: dict[str, Any], manifest_path: Path | None) -> dict[str, Any]:
     audio_path = _case_audio_path(case, manifest_path)
@@ -472,6 +627,8 @@ def _run_case(backend, case: dict[str, Any], manifest_path: Path | None) -> dict
     expected_mistake_min = int(case.get("expected_mistake_min", 0) or 0)
     if len(events) < expected_mistake_min:
         failures.append(f"Only {len(events)} correction(s), expected at least {expected_mistake_min}")
+    expected_failures, expected_checks = _validate_expected_corrections(events, case)
+    failures.extend(expected_failures)
     expected_final_surah = int(case.get("expected_final_surah", 0) or 0)
     if expected_final_surah and current_surah != expected_final_surah:
         failures.append(f"Final surah {current_surah}, expected {expected_final_surah}")
@@ -485,12 +642,14 @@ def _run_case(backend, case: dict[str, Any], manifest_path: Path | None) -> dict
     return {
         "name": case.get("name", audio_path.stem),
         "audio": str(audio_path),
+        "expect_no_mistake": bool(case.get("expect_no_mistake", False)),
         "duration_sec": round(len(audio) / SAMPLE_RATE, 3),
         "passed": not failures,
         "failures": failures,
         "final_surah": current_surah,
         "final_ayah": current_ayah,
         "correction_events": events,
+        "expected_corrections": expected_checks,
         "verse_hits": verse_hits,
         "summary": {
             "windows": max(0, (len(audio) - start) // stride + 1),
@@ -517,6 +676,8 @@ def main() -> int:
     parser.add_argument("--provider", default="cpu", choices=["auto", "cpu", "cuda"])
     parser.add_argument("--decoder", default="context_beam", choices=["greedy", "beam", "context_beam"])
     parser.add_argument("--out")
+    parser.add_argument("--report-out")
+    parser.add_argument("--checkpoint-label", default="Regression Report")
     args = parser.parse_args()
 
     backend = _load_backend(args.provider, args.decoder)
@@ -542,6 +703,9 @@ def main() -> int:
                 f"{event['expected_surah']}:{event['expected_ayah']} detected "
                 f"{event['detected_surah']}:{event['detected_ayah']}"
             )
+        for check in result.get("expected_corrections", []):
+            status = "PASS" if check.get("matched") else "FAIL"
+            print(f"  [{status}] expected: {check.get('label', 'correction')}")
 
     if args.out:
         Path(args.out).write_text(
@@ -549,6 +713,14 @@ def main() -> int:
             encoding="utf-8",
         )
         print(f"Wrote detailed results to {args.out}")
+
+    report = _build_regression_report(results, args.checkpoint_label)
+    print()
+    print(report, end="")
+
+    if args.report_out:
+        Path(args.report_out).write_text(report, encoding="utf-8")
+        print(f"Wrote regression report to {args.report_out}")
 
     return 0 if passed == len(results) else 1
 
