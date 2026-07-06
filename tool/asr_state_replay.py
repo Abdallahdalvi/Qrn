@@ -106,6 +106,16 @@ _REASON_ALIASES = {
     "tail_mismatch": {"tail_mismatch", "same_ayah_tail_mismatch"},
     "foreign_surah": {"foreign_surah", "foreign_recitation"},
     "low_confidence": {"low_confidence", "word_correction"},
+    "wrong_recitation": {
+        "wrong_recitation",
+        "same_surah_wrong_recitation",
+        "same_ayah_tail_mismatch",
+        "tail_mismatch",
+        "foreign_recitation",
+        "foreign_surah",
+        "low_confidence",
+        "word_correction",
+    },
 }
 
 

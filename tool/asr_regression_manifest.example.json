@@ -12,23 +12,49 @@
       "expected_final_ayah_max": 27
     },
     {
-      "name": "rahman_manual_tail_mistake_24",
-      "audio": "regression_audio/rahman_manual_tail_mistake_24.wav",
+      "name": "rahman_manual_wrong_sequence",
+      "audio": "regression_audio/rahman_manual_wrong_sequence.wav",
       "start_surah": 55,
       "start_ayah": 1,
       "taraweeh": true,
       "expect_no_mistake": false,
       "expected_final_surah": 55,
-      "expected_final_ayah_min": 20,
-      "expected_final_ayah_max": 27,
+      "expected_final_ayah_min": 1,
+      "expected_final_ayah_max": 78,
       "expected_corrections": [
         {
-          "label": "wrong ending in Rahman 55:24",
-          "reason": "tail_mismatch",
+          "label": "Rahman wrong recitation after 55:15",
+          "reason": "wrong_recitation",
+          "expected_surah": 55,
+          "expected_ayah": 16,
+          "t_min": 55.0,
+          "t_max": 85.0
+        },
+        {
+          "label": "Rahman long pause after 55:21 should prompt 55:22",
+          "reason": "pause",
+          "expected_surah": 55,
+          "expected_ayah": 22,
+          "t_min": 108.0,
+          "t_max": 124.0
+        },
+        {
+          "label": "Rahman wrong recitation at 55:24",
+          "reason": "wrong_recitation",
           "expected_surah": 55,
           "expected_ayah": 24,
-          "t_min": 130.0,
-          "t_max": 150.0
+          "t_min": 132.0,
+          "t_max": 145.0
+        },
+        {
+          "label": "Rahman jump from 55:25 to 55:29",
+          "reason": "forward_jump",
+          "expected_surah": 55,
+          "expected_ayah": 26,
+          "detected_surah": 55,
+          "detected_ayah": 29,
+          "t_min": 156.0,
+          "t_max": 166.0
         }
       ]
     },
